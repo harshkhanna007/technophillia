@@ -16,6 +16,7 @@ import {
   SPARK_VERT,
 } from './shaders';
 import type { AnyUniform, Shared } from './BranchMesh';
+import { SEED_SCALE } from './config';
 import type { TreeNode } from './types';
 
 const additive = {
@@ -95,9 +96,12 @@ export class Seed {
   private mat: THREE.ShaderMaterial;
   flare = 0;
 
-  constructor(shared: Shared, a: THREE.Color, b: THREE.Color, hot: THREE.Color, extent = 2.1) {
+  constructor(shared: Shared, a: THREE.Color, b: THREE.Color, hot: THREE.Color, extent = 2.2 * SEED_SCALE) {
     this.u = {
       uTime: shared.uTime,
+      uDirs: { value: Array.from({ length: 8 }, () => new THREE.Vector2(1, 0)) },
+      uDirCount: { value: 0 },
+      uScale: { value: SEED_SCALE },
       uAppear: { value: 0 },
       uEnergy: { value: 0 },
       uFlare: { value: 0 },
@@ -113,6 +117,17 @@ export class Seed {
     this.mesh.renderOrder = 4;
   }
 
+  /** the sprouts of the seed point at the exact directions the primary branches leave in */
+  setDirs(positions: { x: number; y: number }[]) {
+    const dirs = this.u.uDirs.value as THREE.Vector2[];
+    const n = Math.min(8, positions.length);
+    for (let i = 0; i < n; i++) {
+      const l = Math.hypot(positions[i].x, positions[i].y) || 1;
+      dirs[i].set(positions[i].x / l, positions[i].y / l);
+    }
+    this.u.uDirCount.value = n;
+  }
+
   dispose() {
     this.mat.dispose();
   }
@@ -125,15 +140,16 @@ export class Background {
   private mat: THREE.ShaderMaterial;
   private geo: THREE.PlaneGeometry;
   readonly lights: THREE.Vector4[];
+  readonly lightCols: THREE.Color[];
 
   constructor(shared: Shared, lightCount: number) {
     this.lights = Array.from({ length: 8 }, () => new THREE.Vector4(0, 0, 4, 0));
+    this.lightCols = Array.from({ length: 8 }, () => new THREE.Color(0.3, 0.5, 1));
     this.u = {
       uTime: shared.uTime,
       uLights: { value: this.lights },
+      uLightCol: { value: this.lightCols },
       uFocus: { value: new THREE.Vector2() },
-      uTintA: { value: new THREE.Color('#2f6dff') },
-      uTintB: { value: new THREE.Color('#8f4bff') },
       uReveal: { value: 1 },
     };
     this.mat = new THREE.ShaderMaterial({
@@ -150,8 +166,10 @@ export class Background {
     this.mesh.renderOrder = -10;
   }
 
-  setLight(i: number, x: number, y: number, radius: number, intensity: number) {
-    if (i < this.lights.length) this.lights[i].set(x, y, radius, intensity);
+  setLight(i: number, x: number, y: number, radius: number, intensity: number, color?: THREE.Color) {
+    if (i >= this.lights.length) return;
+    this.lights[i].set(x, y, radius, intensity);
+    if (color) this.lightCols[i].copy(color);
   }
 
   dispose() {
@@ -168,7 +186,7 @@ export class AmbientParticles {
   private mat: THREE.ShaderMaterial;
   flow = 0;
 
-  constructor(shared: Shared, count: number, pixelRatio: number) {
+  constructor(shared: Shared, count: number, pixelRatio: number, lightU: { uLights: AnyUniform; uLightCol: AnyUniform }, lightCount: number) {
     const seed = new Float32Array(count * 4);
     for (let i = 0; i < seed.length; i++) seed[i] = Math.random();
     this.geo = new THREE.BufferGeometry();
@@ -181,11 +199,14 @@ export class AmbientParticles {
       uBox: { value: new THREE.Vector3(70, 46, 22) },
       uPx: { value: pixelRatio },
       uActivity: { value: 0 },
+      uLights: lightU.uLights,
+      uLightCol: lightU.uLightCol,
     };
     this.mat = new THREE.ShaderMaterial({
       uniforms: this.u,
       vertexShader: PARTICLE_VERT,
       fragmentShader: PARTICLE_FRAG,
+      defines: { LIGHTS: Math.min(8, lightCount) },
       ...additive,
     });
     this.points = new THREE.Points(this.geo, this.mat);

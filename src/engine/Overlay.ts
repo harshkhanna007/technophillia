@@ -8,6 +8,7 @@ interface Item {
   node: TreeNode;
   el: HTMLDivElement;
   btn: HTMLButtonElement;
+  lab: HTMLSpanElement;
   title: HTMLSpanElement;
   desc: HTMLSpanElement;
   role: NodeRole;
@@ -15,10 +16,14 @@ interface Item {
   side: string;
   split: boolean;
   revealed: boolean;
-  interactive: boolean;
-  lastText: string;
   dy: number;
   dx: number;
+  x: number;
+  y: number;
+  mw: number;
+  mh: number;
+  dirty: boolean;
+  measureUntil: number;
 }
 
 export interface OverlayHandlers {
@@ -26,26 +31,50 @@ export interface OverlayHandlers {
   hover(id: string | null): void;
 }
 
+interface Rect {
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+  owner?: Item;
+}
+
+interface Candidate {
+  side: string;
+  dy: number;
+  dx: number;
+  rect: Rect;
+  pen: number;
+}
+
 const hex = (c: THREE.Color) => '#' + c.getHexString(THREE.SRGBColorSpace);
+const OBST_CAP = 5200; // projected obstacle points per frame (x,y pairs)
 
 /**
  * DOM layer for node labels / hit-areas. One button per node (accessible + keyboard friendly),
  * positioned every frame by projecting the node's world position. No React re-renders involved.
+ *
+ * Label layout is a small scored search per label: it measures the real label box, then tries both
+ * sides and several vertical offsets and picks the clearest spot. Node markers, other labels AND the
+ * glowing strands themselves (sampled geometry, supplied by the engine) are all obstacles. A hysteresis
+ * margin keeps labels from flipping while the camera glides.
  */
 export class Overlay {
   readonly root: HTMLDivElement;
   private items = new Map<string, Item>();
-  private cursor: HTMLDivElement | null = null;
-  private cx = 0;
-  private cy = 0;
-  private tx = 0;
-  private ty = 0;
-  private cursorOn = false;
   private v = new THREE.Vector3();
   private disposers: (() => void)[] = [];
   private tweens: gsap.core.Tween[] = [];
+  private obstSource: (() => Float32Array[]) | null = null;
+  private obst = new Float32Array(OBST_CAP);
+  private obstN = 0;
+  private lastW = 0;
 
-  constructor(host: HTMLElement, nodes: TreeNode[], private h: OverlayHandlers) {
+  constructor(
+    host: HTMLElement,
+    nodes: TreeNode[],
+    private h: OverlayHandlers,
+  ) {
     this.root = document.createElement('div');
     this.root.className = 'overlay';
     host.appendChild(this.root);
@@ -65,16 +94,13 @@ export class Overlay {
       btn.setAttribute('aria-label', node.id === 'root' ? 'Return to the seed' : node.title);
       const lab = document.createElement('span');
       lab.className = 'nd__lab';
-      const num = document.createElement('span');
-      num.className = 'nd__num';
-      num.textContent = node.id === 'root' ? '' : node.number;
       const title = document.createElement('span');
       title.className = 'nd__title';
       title.textContent = node.id === 'root' ? '' : node.title;
       const desc = document.createElement('span');
       desc.className = 'nd__desc';
       desc.textContent = node.description;
-      lab.append(num, title, desc);
+      lab.append(title, desc);
       btn.append(lab);
       el.append(btn);
       this.root.append(el);
@@ -83,6 +109,7 @@ export class Overlay {
         node,
         el,
         btn,
+        lab,
         title,
         desc,
         role: 'hidden',
@@ -90,10 +117,14 @@ export class Overlay {
         side: 'r',
         split: false,
         revealed: false,
-        interactive: false,
-        lastText: '',
         dy: 0,
         dx: 0,
+        x: 0,
+        y: 0,
+        mw: 0,
+        mh: 0,
+        dirty: true,
+        measureUntil: 0,
       };
       this.items.set(node.id, item);
 
@@ -113,34 +144,11 @@ export class Overlay {
         btn.removeEventListener('blur', onLeave);
       });
     }
+  }
 
-    if (window.matchMedia('(pointer: fine)').matches) {
-      this.cursor = document.createElement('div');
-      this.cursor.className = 'cursor';
-      this.cursor.innerHTML = '<i></i><b></b>';
-      this.root.append(this.cursor);
-      const move = (e: PointerEvent) => {
-        if (e.pointerType !== 'mouse') return;
-        this.tx = e.clientX;
-        this.ty = e.clientY;
-        if (!this.cursorOn) {
-          this.cx = this.tx;
-          this.cy = this.ty;
-          this.cursorOn = true;
-          this.cursor!.dataset.on = '1';
-        }
-      };
-      const leave = () => {
-        this.cursorOn = false;
-        if (this.cursor) this.cursor.dataset.on = '0';
-      };
-      window.addEventListener('pointermove', move, { passive: true });
-      document.documentElement.addEventListener('pointerleave', leave);
-      this.disposers.push(() => {
-        window.removeEventListener('pointermove', move);
-        document.documentElement.removeEventListener('pointerleave', leave);
-      });
-    }
+  /** the engine supplies world-space (x,y) samples of every visible strand so labels can avoid them */
+  setObstacleSource(fn: () => Float32Array[]) {
+    this.obstSource = fn;
   }
 
   setRole(id: string, role: NodeRole) {
@@ -149,21 +157,20 @@ export class Overlay {
     const prev = it.role;
     it.role = role;
     it.el.dataset.role = role;
-    const interactive = role !== 'hidden';
-    it.btn.tabIndex = interactive ? 0 : -1;
-    it.interactive = interactive;
-    if (role === 'active' && prev !== 'active') {
-      it.revealed = false;
-    }
+    it.btn.tabIndex = role !== 'hidden' ? 0 : -1;
+    it.dirty = true;
+    if (role === 'active' && prev !== 'active') it.revealed = false;
+  }
+
+  /** last projected screen position of a node (px), or null while it is hidden */
+  screenOf(id: string): { x: number; y: number } | null {
+    const it = this.items.get(id);
+    return it && it.role !== 'hidden' && it.vis > 0.05 ? { x: it.x, y: it.y } : null;
   }
 
   setVis(id: string, v: number) {
     const it = this.items.get(id);
     if (it) it.vis = v;
-  }
-
-  setHot(on: boolean) {
-    if (this.cursor) this.cursor.dataset.hot = on ? '1' : '0';
   }
 
   /** luminous title entrance for a freshly activated node */
@@ -194,14 +201,30 @@ export class Overlay {
         { opacity: 0, y: 16, filter: 'blur(10px)' },
         { opacity: 1, y: 0, filter: 'blur(0px)', duration: 0.95 / speed, ease: 'power3.out', stagger: { each: 0.028 / speed, from: 'start' }, overwrite: true },
       ),
-      gsap.fromTo(it.title, { letterSpacing: '0.55em' }, { letterSpacing: '0.16em', duration: 1.9 / speed, ease: 'expo.out', overwrite: true }),
+      gsap.fromTo(it.title, { letterSpacing: '0.55em' }, { letterSpacing: '0.14em', duration: 1.9 / speed, ease: 'expo.out', overwrite: true }),
       gsap.fromTo(it.desc, { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 1.1 / speed, delay: 0.5 / speed, ease: 'power2.out', overwrite: true }),
     );
     it.revealed = true;
+    it.dirty = true;
+    it.measureUntil = performance.now() + 2600; // the title tracks in, so its box keeps changing
   }
 
-  update(camera: THREE.Camera, w: number, hgt: number, dt: number) {
+  private measure(it: Item) {
+    // layout read, but only for the handful of labels whose box actually changed
+    it.mw = it.lab.offsetWidth;
+    it.mh = it.lab.offsetHeight;
+    it.dirty = false;
+  }
+
+  update(camera: THREE.Camera, w: number, hgt: number) {
     const narrow = w < 700;
+    const now = performance.now();
+    if (w !== this.lastW) {
+      this.lastW = w;
+      for (const it of this.items.values()) it.dirty = true;
+    }
+
+    // ── project nodes
     const live: { it: Item; x: number; y: number; prio: number }[] = [];
     for (const it of this.items.values()) {
       const visible = it.vis > 0.012 && it.role !== 'hidden';
@@ -221,140 +244,153 @@ export class Overlay {
       const x = (this.v.x * 0.5 + 0.5) * w;
       const y = (-this.v.y * 0.5 + 0.5) * hgt;
       if (it.el.style.visibility !== 'visible') it.el.style.visibility = 'visible';
+      it.x = x;
+      it.y = y;
       it.el.style.transform = `translate3d(${x.toFixed(1)}px,${y.toFixed(1)}px,0)`;
       it.el.style.opacity = it.vis.toFixed(3);
-      const prio = it.role === 'active' ? (narrow ? 2.5 : 0) : it.role === 'trail' ? 1 : it.role === 'seed' ? 9 : it.role === 'dormant' ? 3 : 2;
+      const prio = it.role === 'active' ? 0 : it.role === 'trail' ? 1 : it.role === 'seed' ? 9 : it.role === 'dormant' ? 3 : 2;
       live.push({ it, x, y, prio });
     }
 
-    // label layout: keep everything on screen and keep labels from colliding
-    live.sort((a, b) => a.prio - b.prio || a.it.node.index - b.it.node.index);
-    const placed: { x0: number; x1: number; y0: number; y1: number; owner?: Item }[] = [];
-    // every visible node marker is an obstacle for every *other* label
-    for (const { it, x, y } of live) {
-      if (it.role === 'seed') continue;
-      placed.push({ x0: x - 20, x1: x + 20, y0: y - 20, y1: y + 20, owner: it });
-    }
-    for (const { it, x, y } of live) {
-      if (it.role === 'seed') continue;
-      if (it.role === 'farbud' || it.role === 'dormant') {
-        // label-less on phones – no layout needed
-        if (narrow) continue;
+    // ── project strand samples (obstacles)
+    let on = 0;
+    if (this.obstSource) {
+      for (const arr of this.obstSource()) {
+        for (let i = 0; i < arr.length && on < OBST_CAP - 1; i += 2) {
+          this.v.set(arr[i], arr[i + 1], 0).project(camera);
+          if (this.v.x < -1.15 || this.v.x > 1.15 || this.v.y < -1.15 || this.v.y > 1.15) continue;
+          this.obst[on++] = (this.v.x * 0.5 + 0.5) * w;
+          this.obst[on++] = (-this.v.y * 0.5 + 0.5) * hgt;
+        }
       }
+    }
+    this.obstN = on;
+    const obst = this.obst;
+    const strandsIn = (r: Rect) => {
+      let c = 0;
+      const x0 = r.x0 - 5;
+      const x1 = r.x1 + 5;
+      const y0 = r.y0 - 5;
+      const y1 = r.y1 + 5;
+      for (let k = 0; k < this.obstN; k += 2) {
+        const px = obst[k];
+        const py = obst[k + 1];
+        if (px > x0 && px < x1 && py > y0 && py < y1) c++;
+      }
+      return c;
+    };
+
+    // ── label layout
+    live.sort((a, b) => a.prio - b.prio || a.it.node.index - b.it.node.index);
+    const placed: Rect[] = [];
+    for (const { it, x, y } of live) {
+      if (it.role === 'seed') continue;
+      placed.push({ x0: x - 22, x1: x + 22, y0: y - 22, y1: y + 22, owner: it });
+    }
+    const overlap = (r: Rect, self: Item) => {
+      let a = 0;
+      for (const p of placed) {
+        if (p.owner === self) continue;
+        const ox = Math.min(r.x1, p.x1 + 6) - Math.max(r.x0, p.x0 - 6);
+        const oy = Math.min(r.y1, p.y1 + 3) - Math.max(r.y0, p.y0 - 3);
+        if (ox > 0 && oy > 0) a += ox * oy;
+      }
+      return a;
+    };
+
+    const fs = narrow ? Math.min(24, Math.max(15, w * 0.052)) : Math.min(38, Math.max(17, w * 0.022));
+    for (const { it, x, y } of live) {
+      if (it.role === 'seed') continue;
       const n = it.node;
       const active = it.role === 'active';
-      const cw = narrow ? 8.3 : it.role === 'trail' || it.role === 'dormant' ? 8.6 : 9.7;
-      const natural = n.title.length * cw;
-      const wrapW = narrow && !active && it.role !== 'trail' && it.role !== 'dormant' ? w * 0.38 : natural;
-      const labW = active ? Math.min(w * (narrow ? 0.52 : 0.34), 560) : Math.min(natural, wrapW);
-      const lines = Math.ceil(natural / Math.max(40, labW));
-      const labH = active ? (narrow ? 170 : 200) : 24 + lines * 14;
-      const yOff = active ? -labH * 0.38 : -labH / 2;
-      const off = 52 + (active ? 10 : 0);
-      const rect = (side: string, dy: number) => {
-        const x0 = side === 'r' ? x + off : x - off - labW;
-        return { x0, x1: x0 + labW, y0: y + yOff + dy, y1: y + yOff + dy + labH };
-      };
-      const hit = (r: { x0: number; x1: number; y0: number; y1: number }) =>
-        r.x0 < 8 || r.x1 > w - 8 || r.y0 < 4 || r.y1 > hgt - 4 || placed.some((p) => p.owner !== it && r.x0 < p.x1 + 6 && r.x1 > p.x0 - 6 && r.y0 < p.y1 + 2 && r.y1 > p.y0 - 2);
+      const label = it.role !== 'farbud';
+      if (!label) continue; // far nodes are label-less until hovered (CSS), nothing to lay out
 
-      if (active && narrow) {
-        // phones: the big title sits centred above or below its node, clamped to the viewport
-        const aw = Math.min(w * 0.8, 420);
-        const ah = 150;
-        const cx = Math.min(w - 8 - aw / 2, Math.max(8 + aw / 2, x));
-        const box = (sd: string, d: number) =>
-          sd === 'b'
-            ? { x0: cx - aw / 2, x1: cx + aw / 2, y0: y + 36 + d, y1: y + 36 + d + ah }
-            : { x0: cx - aw / 2, x1: cx + aw / 2, y0: y - 36 - ah - d, y1: y - 36 - d };
-        // keep the title on the side facing away from the child nodes
-        const childrenUp = (n.children.length ? n.children.reduce((a, c) => a + c.pos.y, 0) / n.children.length - n.pos.y : n.pos.y) > 0;
-        // choose the candidate that overlaps the least (markers and already-placed labels)
-        const area = (r: { x0: number; x1: number; y0: number; y1: number }) => {
-          let a = 0;
-          for (const p of placed) {
-            if (p.owner === it) continue;
-            const ox = Math.min(r.x1, p.x1) - Math.max(r.x0, p.x0);
-            const oy = Math.min(r.y1, p.y1) - Math.max(r.y0, p.y0);
-            if (ox > 0 && oy > 0) a += ox * oy;
-          }
-          if (r.y0 < 40) a += (40 - r.y0) * aw * 2;
-          if (r.y1 > hgt - 56) a += (r.y1 - (hgt - 56)) * aw * 2;
-          return a;
-        };
-        const order = childrenUp ? ['b', 't'] : ['t', 'b'];
-        let pickS = order[0];
-        let pickD = 0;
-        let best = Infinity;
-        for (let oi = 0; oi < 2; oi++) {
-          for (const d of [0, 30, 60]) {
-            const sc = area(box(order[oi], d)) + oi * 2500 + d * 12;
-            if (sc < best) {
-              best = sc;
-              pickS = order[oi];
-              pickD = d;
-            }
-          }
-        }
-        placed.push({ ...box(pickS, pickD) });
-        const dyv = pickS === 'b' ? pickD : -pickD;
-        const dxv = cx - x;
-        if (it.side !== pickS) {
-          it.side = pickS;
-          it.el.dataset.side = pickS;
-        }
-        if (it.dy !== dyv) {
-          it.dy = dyv;
-          it.el.style.setProperty('--dy', dyv + 'px');
-        }
-        if (Math.abs(it.dx - dxv) > 0.5) {
-          it.dx = dxv;
-          it.el.style.setProperty('--dx', dxv.toFixed(1) + 'px');
-        }
-        continue;
-      }
-      if (it.dx !== 0) {
-        it.dx = 0;
-        it.el.style.setProperty('--dx', '0px');
-      }
+      if (it.dirty || (active && now < it.measureUntil)) this.measure(it);
+      const cw = narrow ? 8.3 : it.role === 'trail' || it.role === 'dormant' ? 8.6 : 9.9;
+      const labW = it.mw || Math.min(n.title.length * cw, narrow ? w * 0.38 : 320);
+      const labH = it.mh || (active ? 150 : 22);
+
       let base = n.side as string;
-      if (n.id !== 'root' && narrow) {
+      if (narrow && n.id !== 'root') {
         const rel = x / w;
         base = rel > 0.56 ? 'l' : rel < 0.44 ? 'r' : n.index % 2 ? 'l' : 'r';
       }
       const other = base === 'r' ? 'l' : 'r';
-      let chosen = base;
-      let cdy = 0;
-      let ok = false;
-      search: for (const dy of [0, -24, 24, -48, 48]) {
+      const gap = active ? 72 : 52;
+      const cands: Candidate[] = [];
+      const push = (side: string, dy: number, dx: number, rect: Rect, pen: number) => cands.push({ side, dy, dx, rect, pen });
+
+      if (active && narrow) {
+        // phones: the big title sits centred above or below its node, clamped to the viewport
+        const aw = Math.min(labW, w - 16);
+        const cx = Math.min(w - 8 - aw / 2, Math.max(8 + aw / 2, x));
+        const childrenUp = (n.children.length ? n.children.reduce((a, c) => a + c.pos.y, 0) / n.children.length - n.pos.y : n.pos.y) > 0;
+        const order = childrenUp ? ['b', 't'] : ['t', 'b'];
+        order.forEach((sd, oi) => {
+          for (const d of [0, 30, 60]) {
+            const rect: Rect =
+              sd === 'b'
+                ? { x0: cx - aw / 2, x1: cx + aw / 2, y0: y + 36 + d, y1: y + 36 + d + labH }
+                : { x0: cx - aw / 2, x1: cx + aw / 2, y0: y - 36 - labH - d, y1: y - 36 - d };
+            push(sd, sd === 'b' ? d : -d, cx - x, rect, oi * 60 + d * 1.2);
+          }
+        });
+      } else {
+        const dys = active ? [0, -34, 34, -68, 68, -110, 110] : [0, -20, 20, -40, 40, -62, 62];
         for (const sd of [base, other]) {
-          if (!hit(rect(sd, dy))) {
-            chosen = sd;
-            cdy = dy;
-            ok = true;
-            break search;
+          for (const dy of dys) {
+            const x0 = sd === 'r' ? x + gap : x - gap - labW;
+            const y0 = active ? y - fs * 0.6 + dy : y - labH / 2 + dy;
+            push(sd, dy, 0, { x0, x1: x0 + labW, y0, y1: y0 + labH }, (sd === base ? 0 : 28) + Math.abs(dy) * 1.4);
           }
         }
       }
-      if (!ok) {
-        chosen = base;
-        cdy = 0;
+
+      const topSafe = 44;
+      const botSafe = hgt - 70;
+      const scoreOf = (c: Candidate) => {
+        const r = c.rect;
+        let s = c.pen;
+        if (r.x0 < 10) s += (10 - r.x0) * 40 + 400;
+        if (r.x1 > w - 10) s += (r.x1 - (w - 10)) * 40 + 400;
+        if (r.y0 < topSafe) s += (topSafe - r.y0) * 12 + 150;
+        if (r.y1 > botSafe) s += (r.y1 - botSafe) * 12 + 150;
+        s += overlap(r, it) * 0.12;
+        s += strandsIn(r) * (active ? 8 : 22);
+        return s;
+      };
+      let best = cands[0];
+      let bestS = Infinity;
+      let cur: Candidate | null = null;
+      let curS = Infinity;
+      for (const c of cands) {
+        const s = scoreOf(c);
+        if (s < bestS) {
+          bestS = s;
+          best = c;
+        }
+        if (c.side === it.side && c.dy === it.dy) {
+          cur = c;
+          curS = s;
+        }
       }
-      placed.push({ ...rect(chosen, cdy) });
-      if (it.side !== chosen) {
-        it.side = chosen;
-        it.el.dataset.side = chosen;
+      // hysteresis: stay where we are unless the new spot is clearly better
+      const pick = cur && curS <= bestS + 45 ? cur : best;
+      placed.push({ ...pick.rect });
+
+      if (it.side !== pick.side) {
+        it.side = pick.side;
+        it.el.dataset.side = pick.side;
       }
-      if (it.dy !== cdy) {
-        it.dy = cdy;
-        it.el.style.setProperty('--dy', cdy + 'px');
+      if (it.dy !== pick.dy) {
+        it.dy = pick.dy;
+        it.el.style.setProperty('--dy', pick.dy + 'px');
       }
-    }
-    if (this.cursor && this.cursorOn) {
-      const k = 1 - Math.exp(-dt * 16);
-      this.cx += (this.tx - this.cx) * k;
-      this.cy += (this.ty - this.cy) * k;
-      this.cursor.style.transform = `translate3d(${this.cx.toFixed(1)}px,${this.cy.toFixed(1)}px,0)`;
+      if (Math.abs(it.dx - pick.dx) > 0.5) {
+        it.dx = pick.dx;
+        it.el.style.setProperty('--dx', pick.dx.toFixed(1) + 'px');
+      }
     }
   }
 

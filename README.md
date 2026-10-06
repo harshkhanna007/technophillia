@@ -1,7 +1,7 @@
-# TECHNOPHILIA — grow the tree
+# TECHNOPHILIA: grow the tree
 
 An interactive digital art installation. A single glowing seed in the dark; six independent
-technological organisms that you *grow* by clicking nodes. No scrolling, no menus — the tree is the
+technological organisms that you *grow* by clicking nodes. No scrolling, no menus: the tree is the
 interface.
 
 ```bash
@@ -16,11 +16,11 @@ npm run build && npm start
 | --- | --- |
 | Click / tap a glowing node | Energy travels from the seed through the circuitry, the branch grows, the camera follows, the title ignites, child nodes bloom |
 | Click a *dim* grown node | Re-activate that branch (energy replays along its ancestry) |
-| `Esc` / `Backspace` | Retract one level — energy flows back toward the root, camera pulls out |
+| `Esc` / `Backspace` | Retract one level: energy flows back toward the root, camera pulls out |
 | Click the seed glyph (bottom-left) / `Home` | Retract everything, the six primary territories return |
 | Click a breadcrumb | Jump back to that level |
 | `M` or the sound switch | Mute / unmute the synthesised sound design |
-| `Tab` / `Enter` | Every node is a real button — fully keyboard navigable |
+| `Tab` / `Enter` | Every node is a real button: fully keyboard navigable |
 
 ## Change the content (no engine changes)
 
@@ -36,7 +36,7 @@ Everything lives in [`src/data/tree.ts`](src/data/tree.ts). It is a plain nested
 }
 ```
 
-Add categories, children and grandchildren to any depth — the layout re-partitions the territory
+Add categories, children and grandchildren to any depth: the layout re-partitions the territory
 automatically. Each category is also free to use any `style`.
 
 ## Architecture

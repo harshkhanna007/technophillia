@@ -37,7 +37,7 @@ export default function Hud({ state, meta, onHome, onSelect, onMute }: Props) {
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
           <span className="keys" data-show={depth > 0 ? 1 : 0}>
-            ESC — RETRACT
+            Esc to retract
           </span>
           <button type="button" className="sound" data-muted={muted ? 1 : 0} onClick={onMute} aria-pressed={!muted} aria-label={muted ? 'Unmute sound' : 'Mute sound'}>
             <span className="sound__bars" aria-hidden="true">
@@ -46,7 +46,7 @@ export default function Hud({ state, meta, onHome, onSelect, onMute }: Props) {
               <i />
               <i />
             </span>
-            <span>{muted ? 'SOUND OFF' : 'SOUND ON'}</span>
+            <span className="sound__label">{muted ? 'Sound off' : 'Sound on'}</span>
           </button>
         </div>
       </div>

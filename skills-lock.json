@@ -25,6 +25,12 @@
       "skillPath": "skills/gsap-timeline/SKILL.md",
       "computedHash": "e7c07909bb427f74e1bda1ff716bd97ae166269382f7abbd649c0d1ba8f6e0ec"
     },
+    "review-animations": {
+      "source": "emilkowalski/skills",
+      "sourceType": "github",
+      "skillPath": "skills/review-animations/SKILL.md",
+      "computedHash": "8c2befeb28bb484bf2de7b2fc228774857e266d32a65d76895e78651a536d8cf"
+    },
     "three-best-practices": {
       "source": "emalorenzo/three-agent-skills",
       "sourceType": "github",

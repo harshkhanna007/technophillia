@@ -45,21 +45,21 @@ export default function Experience() {
 
   return (
     <main>
-      <h1 className="sr">{meta.wordmark} — an interactive digital seed that grows into six technological branches</h1>
+      <h1 className="sr">{meta.wordmark}: an interactive digital seed that grows into six technological branches</h1>
       <div ref={hostRef} className="host" />
       {failed ? (
         <div className="fallback" role="alert">
           <p>
-            THIS EXPERIENCE NEEDS WEBGL.
+            This experience needs WebGL.
             <br />
-            TRY A RECENT CHROME, EDGE, FIREFOX OR SAFARI WITH HARDWARE ACCELERATION ENABLED.
+            Try a recent Chrome, Edge, Firefox or Safari with hardware acceleration enabled.
           </p>
         </div>
       ) : (
         <Hud state={state} meta={meta} onHome={home} onSelect={select} onMute={mute} />
       )}
       <noscript>
-        <p className="fallback">THIS EXPERIENCE REQUIRES JAVASCRIPT.</p>
+        <p className="fallback">This experience requires JavaScript.</p>
       </noscript>
     </main>
   );

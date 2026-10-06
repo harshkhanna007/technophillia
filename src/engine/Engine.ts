@@ -5,17 +5,16 @@ import {
   ChromaticAberrationEffect,
   EffectComposer,
   EffectPass,
-  NoiseEffect,
   RenderPass,
-  VignetteEffect,
-  BlendFunction,
 } from 'postprocessing';
 import { BranchMesh } from './BranchMesh';
-import type { Shared } from './BranchMesh';
+import type { AnyUniform, Shared } from './BranchMesh';
 import { AudioEngine } from './AudioEngine';
 import { CameraRig } from './CameraRig';
+import { Cursor } from './Cursor';
+import type { CursorTarget, PointerState } from './Cursor';
 import type { Framing } from './CameraRig';
-import { detectQuality, LOOK, PROFILES } from './config';
+import { detectQuality, LOOK, PROFILES, SEED_SCALE } from './config';
 import type { Quality, QualityProfile } from './config';
 import { AmbientParticles, Background, EnergyOrb, NodeMarkers, Seed, ShockRings, Sparks } from './Fx';
 import { ancestry, buildTree, DEFAULT_LAYOUT, isDescendant } from './layout';
@@ -73,6 +72,7 @@ interface EnergyJob {
   color: THREE.Color;
 }
 
+const SEED_LIGHT = new THREE.Color('#5fd0ff');
 const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
 const growEase = (p: number) => 0.32 * p + 0.68 * (p * p * (3 - 2 * p));
 
@@ -116,6 +116,19 @@ export class Engine {
   private bloom: BloomEffect | null = null;
   private cleanups: (() => void)[] = [];
   private contextLost = false;
+  private cursor!: Cursor;
+  private ptr: PointerState = { x: 0, y: 0, vx: 0, vy: 0, speed: 0, type: 'mouse', down: false, seen: false, inside: false };
+  private ptrPrev = { x: 0, y: 0 };
+  private ptrWorld = new THREE.Vector3();
+  private tmpV = new THREE.Vector3();
+  private pointerLive = false;
+  private overUi = false;
+  private trailAcc = 0;
+  private cursorLight = 0;
+  private lastInput = 0;
+  private skipAcc = 0;
+  private skipFlip = false;
+  private coarse = false;
 
   constructor(host: HTMLElement, private categories: CategoryData[]) {
     this.host = host;
@@ -123,6 +136,9 @@ export class Engine {
     this.profile = PROFILES[this.quality];
     this.reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.gctx = gsap.context(() => {});
+    this.coarse = window.matchMedia('(pointer: coarse)').matches;
+    this.cursor = new Cursor(this.reduced);
+    this.lastInput = performance.now();
 
     this.renderer = new THREE.WebGLRenderer({
       antialias: false,
@@ -131,7 +147,7 @@ export class Engine {
       depth: false,
       powerPreference: 'high-performance',
     });
-    this.renderer.setClearColor(new THREE.Color().setRGB(0.00018, 0.00035, 0.0014, THREE.LinearSRGBColorSpace), 1);
+    this.renderer.setClearColor(0x000000, 1);
     this.dpr = Math.min(window.devicePixelRatio || 1, this.profile.dpr);
     this.renderer.setPixelRatio(this.dpr);
     this.w = Math.max(1, host.clientWidth);
@@ -147,6 +163,7 @@ export class Engine {
 
     this.buildFx();
     this.world = this.buildWorld(this.layoutKind());
+    this.seed.setDirs(this.world.model.primaries.map((n) => n.pos));
     this.setupPost();
     this.bindEvents();
 
@@ -191,6 +208,7 @@ export class Engine {
 
   select(id: string) {
     if (this.destroyed) return;
+    this.lastInput = performance.now();
     this.audio.unlock();
     if (id === 'root') return this.home();
     const rt = this.world.rts.get(id);
@@ -234,6 +252,7 @@ export class Engine {
     this.gctx.kill();
     this.cleanups.forEach((c) => c());
     this.destroyWorld();
+    this.cursor.dispose();
     this.bg.dispose();
     this.ambient.dispose();
     this.sparks.dispose();
@@ -250,12 +269,12 @@ export class Engine {
 
   /* ─────────────────────────── construction ─────────────────────────── */
   private buildFx() {
-    const root = new THREE.Color('#5ad8ff');
+    const root = new THREE.Color('#37d8ff');
     this.bg = new Background(this.shared, this.profile.bgLights);
     this.scene.add(this.bg.mesh);
-    this.ambient = new AmbientParticles(this.shared, this.profile.particles, this.dpr);
+    this.ambient = new AmbientParticles(this.shared, this.profile.particles, this.dpr, this.bg.u as { uLights: AnyUniform; uLightCol: AnyUniform }, this.profile.bgLights);
     this.scene.add(this.ambient.points);
-    this.seed = new Seed(this.shared, root, new THREE.Color('#8f7bff'), new THREE.Color('#ffffff'));
+    this.seed = new Seed(this.shared, root, new THREE.Color('#7b5cff'), new THREE.Color('#ffffff'));
     this.scene.add(this.seed.mesh);
     this.sparks = new Sparks(this.shared, this.profile.sparks, this.dpr);
     this.scene.add(this.sparks.points);
@@ -306,6 +325,14 @@ export class Engine {
       rts.set(node.id, rt);
       list.push(rt);
     });
+    overlay.setObstacleSource(() => {
+      const out: Float32Array[] = [];
+      for (const rt of list) {
+        const b = rt.branch;
+        if (b && b.group.visible) out.push(b.obstacles);
+      }
+      return out;
+    });
     return { kind, model, rts, list, markers, overlay, group };
   }
 
@@ -330,28 +357,24 @@ export class Engine {
       });
       composer.addPass(new RenderPass(this.scene, this.rig.camera));
       const bloom = new BloomEffect({
-        intensity: 1.05,
-        luminanceThreshold: 0.5,
-        luminanceSmoothing: 0.4,
+        intensity: 1.45,
+        luminanceThreshold: 0.34,
+        luminanceSmoothing: 0.5,
         mipmapBlur: true,
-        radius: 0.78,
-        levels: this.quality === 'low' ? 5 : 7,
+        radius: 0.88,
+        levels: this.quality === 'low' ? 5 : 8,
       });
       this.bloom = bloom;
-      const vignette = new VignetteEffect({ offset: 0.3, darkness: 0.82 });
-      const noise = new NoiseEffect({ premultiply: true, blendFunction: BlendFunction.SCREEN });
-      noise.blendMode.opacity.value = 0.025;
-      const effects: (BloomEffect | VignetteEffect | NoiseEffect | ChromaticAberrationEffect)[] = [bloom];
+      const effects: (BloomEffect | ChromaticAberrationEffect)[] = [bloom];
       if (p.chroma) {
         effects.push(
           new ChromaticAberrationEffect({
-            offset: new THREE.Vector2(0.0007, 0.0009),
+            offset: new THREE.Vector2(0.0008, 0.001),
             radialModulation: true,
-            modulationOffset: 0.35,
+            modulationOffset: 0.3,
           }),
         );
       }
-      effects.push(vignette, noise);
       composer.addPass(new EffectPass(this.rig.camera, ...effects));
       composer.setSize(this.w, this.h);
       this.composer = composer;
@@ -368,11 +391,64 @@ export class Engine {
 
     const move = (e: PointerEvent) => {
       this.rig.pTarget.set((e.clientX / this.w) * 2 - 1, -((e.clientY / this.h) * 2 - 1));
+      const p = this.ptr;
+      p.x = e.clientX;
+      p.y = e.clientY;
+      p.type = e.pointerType || 'mouse';
+      if (!p.seen) {
+        p.seen = true;
+        this.ptrPrev.x = p.x;
+        this.ptrPrev.y = p.y;
+      }
+      p.inside = true;
+      this.lastInput = performance.now();
     };
     window.addEventListener('pointermove', move, { passive: true });
     this.cleanups.push(() => window.removeEventListener('pointermove', move));
 
+    const down = (e: PointerEvent) => {
+      const p = this.ptr;
+      p.x = e.clientX;
+      p.y = e.clientY;
+      p.type = e.pointerType || 'mouse';
+      p.down = true;
+      p.seen = true;
+      p.inside = true;
+      this.ptrPrev.x = p.x;
+      this.ptrPrev.y = p.y;
+      this.lastInput = performance.now();
+      this.audio.unlock();
+      const el = e.target as Element | null;
+      // empty space gets a ripple of light; nodes and HUD buttons already react on their own
+      if (!el?.closest?.('.nd__btn, .hud button')) this.tapRipple(e.clientX, e.clientY);
+    };
+    const up = () => {
+      this.ptr.down = false;
+    };
+    const over = (e: PointerEvent) => {
+      this.overUi = !!(e.target as Element | null)?.closest?.('button, a');
+    };
+    const leave = () => {
+      this.ptr.inside = false;
+    };
+    window.addEventListener('pointerdown', down, { passive: true });
+    window.addEventListener('pointerup', up, { passive: true });
+    window.addEventListener('pointercancel', up, { passive: true });
+    window.addEventListener('pointerover', over, { passive: true });
+    document.documentElement.addEventListener('pointerleave', leave);
+    const vis = () => this.audio.setHidden(document.hidden);
+    document.addEventListener('visibilitychange', vis);
+    this.cleanups.push(() => {
+      window.removeEventListener('pointerdown', down);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', up);
+      window.removeEventListener('pointerover', over);
+      document.documentElement.removeEventListener('pointerleave', leave);
+      document.removeEventListener('visibilitychange', vis);
+    });
+
     const key = (e: KeyboardEvent) => {
+      this.lastInput = performance.now();
       if (e.key === 'Escape' || e.key === 'Backspace') {
         e.preventDefault();
         this.back();
@@ -427,6 +503,7 @@ export class Engine {
     this.gctx = gsap.context(() => {});
     this.destroyWorld();
     this.world = this.buildWorld(kind);
+    this.seed.setDirs(this.world.model.primaries.map((n) => n.pos));
     this.path = [];
     this.buds.clear();
     this.hoverId = null;
@@ -513,7 +590,7 @@ export class Engine {
     if (parent.depth === 0) {
       const l = Math.hypot(node.pos.x, node.pos.y) || 1;
       heading = { x: node.pos.x / l, y: node.pos.y / l };
-      A = { x: heading.x * 0.5, y: heading.y * 0.5 };
+      A = { x: heading.x * 0.6 * SEED_SCALE, y: heading.y * 0.6 * SEED_SCALE };
     } else {
       const pb = this.branchFor(this.world.rts.get(parent.id)!);
       heading = pb.trunk.endHeading;
@@ -556,8 +633,9 @@ export class Engine {
         }
       } else if (this.buds.has(rt.node.id)) {
         role = rt.node.depth === 1 && this.path.length === 0 ? 'rootbud' : 'bud';
-        // phones: only the children of the current node keep their label, the rest stay as bare nodes
-        if (this.w < 700 && deepest && rt.node.parent !== deepest) role = 'farbud';
+        // declutter: only the nodes you can step to next keep a permanent label; the rest reveal theirs on hover
+        const focusParent = deepest ? (deepest.children.length ? deepest : deepest.parent) : null;
+        if (deepest && rt.node.parent !== focusParent) role = 'farbud';
         visT = rt.hold ? 0 : 1;
       }
       rt.role = role;
@@ -632,7 +710,6 @@ export class Engine {
         rt.branch?.setGhostBoost(2.6);
       } else if (rt.role !== 'hidden') this.audio.tick();
     }
-    this.world.overlay.setHot(!!rt && rt.role !== 'hidden');
   }
 
   /* ─────────────────────────── energy / fx ─────────────────────────── */
@@ -732,6 +809,7 @@ export class Engine {
     rt.hovT = 1;
     rt.flare = 1.6;
     this.audio.select();
+    this.haptic(12);
     this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.a, 2.3, 1.1);
     this.burstAt(node, 26, 2.4);
     this.g(() => gsap.to(branch, { ghostProgress: 0, duration: 0.35, ease: 'power2.in', overwrite: true }));
@@ -791,6 +869,7 @@ export class Engine {
     this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.accent, 2.1, 1.1);
     this.burstAt(node, 90, 4.2);
     this.audio.impact();
+    this.haptic([10, 40, 18]);
     if (!this.reduced) this.rig.impulse(-5.5);
     this.rig.followTarget = 0;
     this.emit();
@@ -912,13 +991,108 @@ export class Engine {
     });
   }
 
+  /* ─────────────────────────── pointer, cursor, touch ─────────────────────────── */
+  private haptic(pattern: number | number[]) {
+    if (this.coarse && !this.reduced && typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+      try {
+        navigator.vibrate(pattern);
+      } catch {
+        /* not permitted */
+      }
+    }
+  }
+
+  /** pointer position projected onto the z=0 plane of the tree */
+  private toWorld(cx: number, cy: number) {
+    const cam = this.rig.camera;
+    this.tmpV
+      .set((cx / this.w) * 2 - 1, -((cy / this.h) * 2 - 1), 0.5)
+      .unproject(cam)
+      .sub(cam.position)
+      .normalize();
+    const t = -cam.position.z / this.tmpV.z;
+    this.ptrWorld.set(cam.position.x + this.tmpV.x * t, cam.position.y + this.tmpV.y * t, 0);
+  }
+
+  private pointerColor(): THREE.Color {
+    const rt = this.hoverId ? this.world.rts.get(this.hoverId) : null;
+    if (rt && rt.node.depth > 0) return rt.node.palette.a;
+    const cur = this.path[this.path.length - 1];
+    return cur ? cur.palette.a : SEED_LIGHT;
+  }
+
+  private tapRipple(cx: number, cy: number) {
+    this.toWorld(cx, cy);
+    const c = this.pointerColor();
+    this.rings.fire(this.ptrWorld.x, this.ptrWorld.y, 0.1, c, 1.5, 0.85);
+    if (!this.reduced) {
+      this.sparks.burst(this.ptrWorld.x, this.ptrWorld.y, 0.1, 14, { speed: 1.8, size: 3.6, life: 0.8, color: c, hot: 0.4 });
+    }
+  }
+
+  private updatePointer(dt: number) {
+    const p = this.ptr;
+    const dx = p.x - this.ptrPrev.x;
+    const dy = p.y - this.ptrPrev.y;
+    this.ptrPrev.x = p.x;
+    this.ptrPrev.y = p.y;
+    const k = 1 - Math.exp(-dt * 12);
+    p.vx += (dx / dt - p.vx) * k;
+    p.vy += (dy / dt - p.vy) * k;
+    p.speed = Math.hypot(p.vx, p.vy);
+
+    const live = p.type === 'touch' ? p.down : p.seen && p.inside;
+    this.pointerLive = live;
+    const color = this.pointerColor();
+    if (live) {
+      this.rig.camera.updateMatrixWorld();
+      this.toWorld(p.x, p.y);
+      if (!this.reduced) {
+        // a thread of light trails the pointer, denser the faster it moves
+        this.trailAcc = Math.min(6, this.trailAcc + dt * Math.min(80, p.speed * 0.04) * (p.type === 'touch' ? 0.8 : 1));
+        const n = Math.min(3, Math.floor(this.trailAcc));
+        if (n > 0) {
+          this.trailAcc -= n;
+          this.sparks.burst(this.ptrWorld.x, this.ptrWorld.y, 0.15, n, {
+            speed: 0.55,
+            size: 3.4,
+            life: 0.75,
+            color,
+            hot: 0.3,
+            dir: { x: -dx, y: dy },
+            spread: 1.5,
+          });
+        }
+      }
+    } else this.trailAcc = 0;
+    const lt = live ? (this.hoverId ? 0.9 : 0.45) : 0;
+    this.cursorLight += (lt - this.cursorLight) * (1 - Math.exp(-dt * 8));
+
+    // the visible cursor (mouse / pen only)
+    let target: CursorTarget | null = null;
+    const rt = this.hoverId ? this.world.rts.get(this.hoverId) : null;
+    if (rt && rt.role !== 'hidden') {
+      const sp = this.world.overlay.screenOf(rt.node.id);
+      if (sp) target = { x: sp.x, y: sp.y, kind: 'node' };
+    } else if (this.overUi) target = { x: p.x, y: p.y, kind: 'ui' };
+    this.cursor.update(dt, p, target, '#' + color.getHexString(THREE.SRGBColorSpace));
+  }
+
   /* ─────────────────────────── frame ─────────────────────────── */
   private tick = () => {
     if (this.destroyed || this.contextLost) return;
     const now = performance.now();
     const dt = Math.min(0.05, Math.max(0.0005, (now - this.lastTime) / 1000));
     this.lastTime = now;
-    this.frame(dt);
+    this.skipAcc += dt;
+    // battery: on non-flagship devices an idle scene renders every other frame (still 30fps)
+    if (this.quality !== 'high' && this.introDone && !this.busy && !this.ptr.down && now - this.lastInput > 2500) {
+      this.skipFlip = !this.skipFlip;
+      if (this.skipFlip) return;
+    }
+    const d = Math.min(0.066, this.skipAcc);
+    this.skipAcc = 0;
+    this.frame(d);
   };
 
   private frame(dt: number) {
@@ -1007,6 +1181,7 @@ export class Engine {
 
     // ── camera
     this.rig.update(dt, time);
+    this.updatePointer(dt);
     const cam = this.rig.camera;
     this.bg.mesh.position.x = this.rig.focus.x;
     this.bg.mesh.position.y = this.rig.focus.y;
@@ -1015,7 +1190,7 @@ export class Engine {
     this.updateLights();
 
     // ── dom
-    w.overlay.update(cam, this.w, this.h, dt);
+    w.overlay.update(cam, this.w, this.h);
 
     // ── render
     if (this.composer) this.composer.render(dt);
@@ -1026,22 +1201,29 @@ export class Engine {
 
   private updateLights() {
     const bg = this.bg;
+    // the last light slot always belongs to the cursor, everything else stays below it
+    const cap = Math.min(8, this.profile.bgLights) - 1;
     let i = 0;
-    const seedE = 0.55 + (this.seed.u.uEnergy.value as number) * 0.8;
-    bg.setLight(i++, 0, 0, 3.8, seedE);
+    const seedE = 0.6 + (this.seed.u.uEnergy.value as number) * 0.8;
+    bg.setLight(i++, 0, 0, 3.2, seedE, SEED_LIGHT);
     const job = this.energy;
-    if (job && (this.orb.u.uAmp.value as number) > 0.05) {
+    if (job && (this.orb.u.uAmp.value as number) > 0.05 && i < cap) {
       const o = this.orb.u.uPos.value as THREE.Vector3;
-      bg.setLight(i++, o.x, o.y, 3.4, 1.7 * (this.orb.u.uAmp.value as number));
+      bg.setLight(i++, o.x, o.y, 3.6, 1.8 * (this.orb.u.uAmp.value as number), job.color);
     }
     const cur = this.path[this.path.length - 1];
-    if (cur) bg.setLight(i++, cur.pos.x, cur.pos.y, 5.2, 1.0);
-    for (let k = this.path.length - 2; k >= 0 && i < 8; k--) bg.setLight(i++, this.path[k].pos.x, this.path[k].pos.y, 3.8, 0.6);
-    for (const rt of this.world.list) {
-      if (i >= 8) break;
-      if (rt.role === 'dormant') bg.setLight(i++, rt.node.pos.x, rt.node.pos.y, 3.2, 0.32);
+    if (cur && i < cap) bg.setLight(i++, cur.pos.x, cur.pos.y, 5.4, 1.0, cur.palette.a);
+    for (let k = this.path.length - 2; k >= 0 && i < cap; k--) {
+      const n = this.path[k];
+      bg.setLight(i++, n.pos.x, n.pos.y, 3.8, 0.6, n.palette.a);
     }
-    while (i < 8) bg.setLight(i++, 0, 0, 1, 0);
+    for (const rt of this.world.list) {
+      if (i >= cap) break;
+      if (rt.role === 'dormant') bg.setLight(i++, rt.node.pos.x, rt.node.pos.y, 3.2, 0.3, rt.node.palette.a);
+    }
+    while (i < cap) bg.setLight(i++, 0, 0, 1, 0);
+    // the pointer is a small lamp: it reveals the circuitry under it
+    bg.setLight(cap, this.ptrWorld.x, this.ptrWorld.y, 1.9, this.cursorLight, this.pointerColor());
   }
 
   /** adaptive resolution: if we cannot hold ~45fps for a while, trade pixels for smoothness */

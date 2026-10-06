@@ -36,3 +36,6 @@ export const LOOK = {
   growMax: 3.0,
   pulseSpeed: 15,
 };
+
+/** world-space scale of the seed artwork (its sprouts end at 0.6 x this) */
+export const SEED_SCALE = 1.9;

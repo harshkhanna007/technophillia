@@ -1,6 +1,6 @@
 /* All GLSL lives here. Colours are treated as linear; the composer / colorspace chunk handles output. */
 
-export const HALO = '4.0';
+export const HALO = '5.0';
 
 export const GLSL_COMMON = /* glsl */ `
 float hash11(float p){ p = fract(p * .1031); p *= p + 33.33; p *= p + p; return fract(p); }
@@ -62,17 +62,19 @@ void main(){
   float u = vB.z;
   float total = vB.w;
   float d = abs(side);
-  float core = exp(-d * d * 20.0);
-  float halo = exp(-d * d * 3.5);
-  float prof = core + halo * 0.2;
+  // light-wire profile: hair-thin hot core, saturated halo, very wide soft aura
+  float core = exp(-d * d * 34.0);
+  float halo = exp(-d * d * 4.2);
+  float aura = exp(-d * d * 1.3);
+  float prof = (core + halo * 0.24 + aura * 0.08) * (1.0 - smoothstep(0.45, 1.0, d));
   vec3 col;
   if (uGhost > 0.5) {
     float reveal = smoothstep(t, t + 0.012, uProgress);
     if (reveal < 0.003) discard;
-    float ph = fract(u * 2.6 - uTime * 0.12);
+    float ph = fract(u * 2.4 - uTime * 0.1);
     float dash = smoothstep(0.1, 0.3, ph) * (1.0 - smoothstep(0.55, 0.8, ph));
-    float head = exp(-max(uProgress - t, 0.0) * 26.0);
-    float I = (core * 0.9 + halo * 0.16) * reveal * (0.11 + 0.2 * dash + head * 0.9);
+    float head = exp(-max(uProgress - t, 0.0) * 24.0);
+    float I = (core * 0.8 + halo * 0.14) * (1.0 - smoothstep(0.45, 1.0, d)) * reveal * (0.055 + 0.15 * dash + head * 0.9);
     col = mix(uColA, uColB, t) * I * uDim * uBoost;
   } else {
     float reveal = smoothstep(t, t + 0.004, uProgress);
@@ -88,10 +90,12 @@ void main(){
     float f = fract(u * 0.2 - uTime * 0.4 + seed * 9.0);
     float bead = pow(smoothstep(0.88, 1.0, f), 2.0) * step(0.5, fract(seed * 13.7)) * uIdle;
     vec3 base = mix(uColA, uColB, clamp(t * 0.7 + fract(seed * 3.1) * 0.35, 0.0, 1.0));
-    vec3 hot = mix(uAccent, vec3(1.0), 0.7);
-    col = base * (0.2 + 0.6 * bright) * uDim * uBoost;
-    col += hot * (energy * 1.9 + bead * 0.8 * bright * uDim);
-    col += base * energy * 0.9;
+    vec3 hot = mix(uAccent, vec3(1.0), 0.78);
+    float rest = (0.065 + 0.4 * bright) * uDim * uBoost;
+    col = base * rest;
+    col = mix(col, hot * rest * 1.5, core * 0.38);
+    col += hot * (energy * 2.2 + bead * 1.0 * bright * uDim);
+    col += base * energy * 1.1;
     col *= prof * endFade * reveal;
   }
   gl_FragColor = vec4(col, 1.0);
@@ -147,16 +151,13 @@ void main(){
   float r = min(sz.x, sz.y);
   float flash = exp(-max(uProgress - vMeta.x, 0.0) * 11.0);
   float d = 1e3;
-  float solid = 0.0;
   float blink = 1.0;
   if (shape < 0.5) {
     d = length(p) - r * 0.55;
-    solid = 1.0;
   } else if (shape < 1.5) {
     d = abs(length(p) - r * 0.95) - r * 0.13;
   } else if (shape < 2.5) {
     d = length(p) - r * 0.5;
-    solid = 1.0;
     blink = 0.5 + 0.5 * sin(uTime * (1.6 + seed * 4.0) + seed * 40.0);
   } else if (shape < 3.5) {
     float box = sdBox(p, sz);
@@ -166,26 +167,21 @@ void main(){
     float pins = sdBox(vec2(px, abs(p.y) - sz.y - 0.02), vec2(0.011, 0.028));
     pins = max(pins, abs(p.x) - sz.x * 0.92);
     float led = length(p - vec2(sz.x * 0.62, 0.0)) - sz.y * 0.22;
-    d = min(min(outline, pins), min(die + 0.0, led));
-    solid = 0.0;
+    d = min(min(outline, pins), min(die, led));
     blink = 0.65 + 0.35 * sin(uTime * 2.0 + seed * 30.0) * step(0.0, -led + 0.02);
   } else if (shape < 4.5) {
     vec2 q = vec2(p.x + p.y, p.x - p.y) * 0.7071;
     d = sdBox(q, vec2(r * 0.55));
-    solid = 1.0;
   } else if (shape < 5.5) {
     d = abs(sdHex(p, r * 0.95)) - r * 0.1;
-    float dotc = length(p) - r * 0.2;
-    d = min(d, dotc);
+    d = min(d, length(p) - r * 0.2);
   } else if (shape < 6.5) {
     d = abs(sdBox(p, vec2(r * 0.85))) - r * 0.14;
     d = min(d, length(p) - r * 0.2);
   } else if (shape < 7.5) {
     d = sdTri(p * vec2(1.0, -1.0), r * 0.7);
-    solid = 1.0;
   } else if (shape < 8.5) {
     d = min(sdBox(p, vec2(r * 0.9, r * 0.16)), sdBox(p, vec2(r * 0.16, r * 0.9)));
-    solid = 1.0;
   } else {
     d = min(abs(length(p) - r * 0.95) - r * 0.11, length(p) - r * 0.32);
   }
@@ -193,11 +189,11 @@ void main(){
   float a = 1.0 - smoothstep(-ew, ew, d);
   vec2 qe = abs(p) / vExt;
   float fadeEdge = 1.0 - smoothstep(0.35, 1.0, max(qe.x, qe.y));
-  float glow = exp(-max(d, 0.0) / (r * 0.7 + 0.006)) * 0.5 * fadeEdge;
+  float glow = exp(-max(d, 0.0) / (r * 0.8 + 0.006)) * 0.55 * fadeEdge;
   vec3 tone = mix(mix(uColA, uColB, fract(seed * 7.3)), uAccent, vMeta.w);
-  vec3 hot = mix(uAccent, vec3(1.0), 0.75);
-  float I = (a * (0.7 + 0.6 * vMeta.y) + glow * 0.55) * blink * uDim * uBoost;
-  vec3 col = tone * I + hot * flash * (a * 2.4 + glow * 0.8);
+  vec3 hot = mix(uAccent, vec3(1.0), 0.8);
+  float I = (a * (0.6 + 0.6 * vMeta.y) + glow * 0.6) * blink * uDim * uBoost;
+  vec3 col = mix(tone, hot, a * 0.3) * I + hot * flash * (a * 2.6 + glow * 1.0);
   gl_FragColor = vec4(col, 1.0);
   #include <colorspace_fragment>
 }
@@ -238,35 +234,40 @@ void main(){
   vec2 q = vQ;
   float r = length(q);
   float ang = atan(q.y, q.x);
-  float TAU = 6.28318530718;
   float vis = vState.x;
   float act = vState.y;
   float hov = vState.z;
   float flare = min(vState.w, 1.3);
   float seed = vInfo.y;
-  float breathe = 0.5 + 0.5 * sin(uTime * 1.6 + seed * 6.28);
-  float ringR = mix(0.4, 0.34, act) * (1.0 + 0.1 * hov + 0.05 * breathe * (1.0 - act));
-  float ring = exp(-pow((r - ringR) / 0.04, 2.0));
-  float dotR = mix(0.1, 0.2, act) * (1.0 + hov * 0.45);
-  float dotc = smoothstep(dotR, dotR * 0.45, r);
-  float spin = (0.12 + 0.5 * hov + act * 0.2) * (mod(floor(seed * 10.0), 2.0) * 2.0 - 1.0);
-  float dashed = step(0.5, fract(ang / TAU * 14.0 + uTime * spin));
-  float ring2 = exp(-pow((r - 0.8) / 0.022, 2.0)) * dashed * (0.28 + 0.55 * hov + 0.25 * act);
-  float arcs = exp(-pow((r - 0.62) / 0.03, 2.0)) * step(0.4, fract(ang / TAU * 3.0 - uTime * 0.22)) * act;
-  float tick = step(0.86, r) * step(r, 0.95) * step(0.82, fract(ang / TAU * 28.0 + uTime * 0.03)) * (act * 0.6 + hov * 0.4);
-  float halo = exp(-r * r * 8.0) * (0.16 + 0.5 * act + 0.45 * hov + flare * 0.8);
-  float core = exp(-r * r * 60.0) * (act * 1.7 + hov * 0.6);
-  vec3 base = vColA;
-  vec3 hot = mix(vAccent, vec3(1.0), 0.8);
-  vec3 col = base * (ring * (0.75 + 0.7 * hov) + ring2 + arcs + tick + halo * 0.55 + dotc * (0.7 + act * 0.5));
-  col += hot * (core + flare * exp(-r * r * 22.0) * 1.5);
+  float breathe = 0.5 + 0.5 * sin(uTime * 1.4 + seed * 6.28);
+
+  // luminous bead
+  float coreR = mix(0.085, 0.17, act) * (1.0 + 0.55 * hov);
+  float core = smoothstep(coreR, coreR * 0.3, r);
+  float coreGlow = exp(-r * r * mix(64.0, 28.0, act));
+
+  // one hairline ring, breathing while waiting
+  float ringR = mix(0.4, 0.33, act) * (1.0 + 0.18 * hov + 0.045 * breathe * (1.0 - act));
+  float ring = exp(-pow((r - ringR) / (0.016 + 0.01 * hov), 2.0)) * (0.3 + 0.4 * hov + 0.45 * act);
+
+  // two orbiting arcs
+  float spin = (0.3 + 1.0 * hov + 0.3 * act) * (mod(floor(seed * 10.0), 2.0) * 2.0 - 1.0);
+  float arcMask = smoothstep(0.55, 0.92, cos(ang - uTime * spin + seed * 6.0)) + smoothstep(0.55, 0.92, cos(ang - uTime * spin + seed * 6.0 + 3.14159));
+  float arcs = exp(-pow((r - 0.66) / 0.011, 2.0)) * arcMask * (0.22 + 0.55 * hov + 0.35 * act);
+
+  float halo = exp(-r * r * 7.5) * (0.1 + 0.4 * act + 0.32 * hov + flare * 0.7);
+
+  vec3 hot = mix(vAccent, vec3(1.0), 0.82);
+  vec3 col = vColA * (ring + arcs + halo * 0.85 + coreGlow * 0.45);
+  col += mix(vColA, hot, 0.55) * core * (0.85 + act * 0.6);
+  col += hot * (coreGlow * (act * 1.3 + hov * 0.5) + flare * exp(-r * r * 18.0) * 1.2);
   col *= 1.0 - smoothstep(1.4, 2.3, r);
   gl_FragColor = vec4(col * vis, 1.0);
   #include <colorspace_fragment>
 }
 `;
 
-/* ───────────────────────── seed ───────────────────────── */
+/* ───────────────────────── seed: an armillary of light ───────────────────────── */
 export const SEED_VERT = /* glsl */ `
 varying vec2 vP;
 uniform float uExtent;
@@ -286,61 +287,101 @@ uniform vec3 uColA;
 uniform vec3 uColB;
 uniform vec3 uHot;
 uniform float uExtent;
+uniform float uScale;
+uniform vec2 uDirs[8];
+uniform int uDirCount;
 varying vec2 vP;
-${GLSL_COMMON}
-float ringp(float r, float R, float w){ return exp(-pow((r - R) / w, 2.0)); }
+const float TAU = 6.28318530718;
+vec2 rot(vec2 p, float a){ float c = cos(a); float s = sin(a); return vec2(c * p.x - s * p.y, s * p.x + c * p.y); }
+
+// tilted orbit: returns hairline intensity, depth (-1 behind .. 1 in front)
+float orbit(vec2 p, float R, float tilt, float rotA, float w, out float depth){
+  vec2 q = rot(p, -rotA);
+  float ct = cos(tilt);
+  q.y /= ct;
+  float d = abs(length(q) - R) * mix(1.0, ct, 0.6);
+  depth = q.y / R;
+  return exp(-pow(d / w, 2.0));
+}
+
+vec2 orbitPoint(float R, float tilt, float rotA, float t){
+  vec2 b = vec2(cos(t), sin(t) * cos(tilt)) * R;
+  return rot(b, rotA);
+}
+
 void main(){
-  vec2 p = vP;
   float T = uTime;
-  float breathe = 1.0 + 0.06 * sin(T * 1.7);
-  float r = length(p) / (breathe * (0.55 + 0.45 * uAppear));
+  float ap = 0.45 + 0.55 * uAppear;
+  float breathe = 1.0 + 0.035 * sin(T * 1.6);
+  vec2 p = vP / (ap * breathe * uScale);
+  float r = length(p);
   float a = atan(p.y, p.x);
-  float TAU = 6.28318530718;
-  float plasma = 0.5 + 0.5 * sin(a * 3.0 + T * 0.7 + sin(r * 14.0 - T * 1.3) * 2.0);
   vec3 col = vec3(0.0);
-  float core = exp(-r * r * 60.0);
-  col += uHot * core * (1.5 + 0.4 * sin(T * 2.1) + uEnergy * 1.2 + uHover * 0.5);
-  col += mix(uColA, uColB, plasma) * exp(-r * r * 16.0) * (0.5 + 0.35 * plasma + uEnergy * 0.4);
-  // circuit rings
-  for (int k = 0; k < 5; k++) {
-    float fk = float(k);
-    float R = 0.24 + 0.115 * fk;
-    float seg = 9.0 + fk * 6.0;
-    float dir = mod(fk, 2.0) * 2.0 - 1.0;
-    float cell = floor((a / TAU + T * 0.018 * dir * (1.0 + fk * 0.3)) * seg);
-    float h = hash11(cell + fk * 17.3);
-    float on = step(0.32, h);
-    float band = ringp(r, R, 0.0065 + 0.0015 * fk);
-    float flick = 0.55 + 0.45 * step(0.82, h) * (0.5 + 0.5 * sin(T * 3.0 + cell));
-    col += mix(uColA, uColB, fk / 4.0) * band * on * flick * (0.85 + uEnergy) * (1.0 - fk * 0.14);
+
+  // atmosphere
+  col += uColB * exp(-r * r * 12.0) * 0.17 + uColA * exp(-r * 3.4) * 0.04 * (1.0 + uEnergy);
+
+  // the seed itself: white-hot kernel wrapped in a living plasma
+  float core = exp(-r * r * 260.0);
+  float swirl = 0.5 + 0.5 * sin(a * 3.0 + T * 0.8 + sin(r * 34.0 - T * 1.7) * 1.7);
+  col += uHot * core * (2.1 + uEnergy * 1.6 + uHover * 0.7);
+  col += mix(uColA, uColB, swirl) * exp(-r * r * 75.0) * (0.75 + 0.35 * swirl);
+
+  // glass shell with a chromatic fringe
+  for (int c = 0; c < 3; c++) {
+    float rr = 0.122 + float(c) * 0.0065;
+    float ring = exp(-pow((r - rr) / 0.0045, 2.0));
+    vec3 tint = c == 0 ? vec3(1.0, 0.32, 0.62) : (c == 1 ? vec3(0.3, 1.0, 0.82) : vec3(0.38, 0.55, 1.0));
+    col += tint * ring * 0.55;
   }
-  // radial traces with nodes
-  float spokes = 14.0;
-  float sa = fract(a / TAU * spokes + 0.5) - 0.5;
-  float sid = floor(a / TAU * spokes + 0.5);
-  float sh = hash11(sid * 3.7);
-  float spoke = exp(-pow(sa * r * 28.0, 2.0)) * smoothstep(0.2, 0.26, r) * (1.0 - smoothstep(0.7, 0.82, r)) * step(0.4, sh);
-  float flow = pow(smoothstep(0.85, 1.0, fract(r * 1.8 - T * 0.35 + sh * 4.0)), 2.0);
-  col += mix(uColA, uHot, 0.35) * spoke * (0.18 + flow * 1.2);
-  // expanding pulses
-  float pr = fract(T * 0.2);
-  col += uColA * ringp(r, 0.2 + pr * 1.3, 0.016) * (1.0 - pr) * 0.7;
-  float fl = clamp(uFlare, 0.0, 1.0);
-  col += uHot * ringp(r, 0.2 + fl * 1.5, 0.02 + 0.03 * fl) * (1.0 - fl) * step(0.0001, uFlare) * 1.4;
-  // orbiting beads
+
+  // three precessing orbits, each with a bead of light
   for (int k = 0; k < 3; k++) {
     float fk = float(k);
-    float ba = T * (0.55 + fk * 0.22) * (mod(fk, 2.0) * 2.0 - 1.0) + fk * 2.1;
-    vec2 bp = vec2(cos(ba), sin(ba)) * (0.37 + fk * 0.115);
-    col += uHot * exp(-dot(p / breathe - bp, p / breathe - bp) * 900.0) * 1.3;
+    float R = 0.3 + 0.16 * fk;
+    float tilt = 1.18 - 0.22 * fk + 0.14 * sin(T * 0.2 + fk * 1.3);
+    float rotA = T * (0.085 + 0.035 * fk) * (mod(fk, 2.0) * 2.0 - 1.0) + fk * 1.7;
+    float depth;
+    float o = orbit(p, R, tilt, rotA, 0.0042 + 0.0008 * fk, depth);
+    float vis = 0.3 + 0.7 * smoothstep(-0.6, 0.8, depth);
+    col += mix(uColA, uColB, fk / 2.0) * o * vis * (0.95 + uEnergy);
+    float tb = T * (0.65 + 0.24 * fk) + fk * 2.1;
+    vec2 bp = orbitPoint(R, tilt, rotA, tb);
+    float bead = exp(-dot(p - bp, p - bp) * 1500.0);
+    col += uHot * bead * (0.5 + 1.0 * smoothstep(-0.5, 0.9, sin(tb))) * 1.5;
   }
-  col *= (1.0 - smoothstep(0.75, 1.0, length(p) / uExtent)) * uAppear;
+
+  // one sprout per branch direction, ending in a bead where the trace takes over
+  for (int i = 0; i < 8; i++) {
+    if (i >= uDirCount) break;
+    vec2 dir = uDirs[i];
+    float along = dot(p, dir);
+    float perp = dot(p, vec2(-dir.y, dir.x));
+    float w = 0.0042 + 0.003 * smoothstep(0.1, 0.5, along);
+    float spike = exp(-pow(perp / w, 2.0)) * smoothstep(0.17, 0.25, along) * (1.0 - smoothstep(0.5, 0.62, along));
+    float flow = pow(smoothstep(0.8, 1.0, fract(along * 2.2 - T * 0.55 + float(i) * 0.21)), 2.0);
+    col += mix(uColA, uHot, 0.35) * spike * (0.35 + flow * 1.7 + uEnergy * 0.9);
+    vec2 tip = dir * 0.6;
+    col += uHot * exp(-dot(p - tip, p - tip) * 2800.0) * (0.75 + 0.25 * sin(T * 2.0 + float(i)));
+  }
+
+  // fine measuring scale and a ring of dust
+  col += uColA * exp(-pow((r - 0.84) / 0.0028, 2.0)) * step(0.7, fract(a / TAU * 60.0)) * 0.14;
+  col += uColB * exp(-pow((r - 0.93) / 0.004, 2.0)) * step(0.82, fract(a / TAU * 48.0 + T * 0.012)) * 0.3;
+
+  // breathing wave and ignition flare
+  float pr = fract(T * 0.16);
+  col += uColA * exp(-pow((r - (0.2 + pr * 0.78)) / 0.009, 2.0)) * (1.0 - pr) * 0.3;
+  float fl = clamp(uFlare, 0.0, 1.0);
+  col += uHot * exp(-pow((r - (0.15 + fl * 0.95)) / (0.02 + 0.04 * fl), 2.0)) * (1.0 - fl) * step(0.0001, uFlare) * 1.6;
+
+  col *= (1.0 - smoothstep(0.8, 1.0, length(vP) / uExtent)) * uAppear;
   gl_FragColor = vec4(col, 1.0);
   #include <colorspace_fragment>
 }
 `;
 
-/* ───────────────────────── background circuitry ───────────────────────── */
+/* ───────────────────────── background: pure black, light fog, circuitry revealed by light ───────────────────────── */
 export const BG_VERT = /* glsl */ `
 varying vec2 vWorld;
 void main(){
@@ -353,9 +394,8 @@ void main(){
 export const BG_FRAG = /* glsl */ `
 uniform float uTime;
 uniform vec4 uLights[8];
+uniform vec3 uLightCol[8];
 uniform vec2 uFocus;
-uniform vec3 uTintA;
-uniform vec3 uTintB;
 uniform float uReveal;
 varying vec2 vWorld;
 ${GLSL_COMMON}
@@ -379,29 +419,40 @@ vec3 circuit(vec2 p, float scale, float salt){
   if (eU > 0.5) d = min(d, seg(f, vec2(0.0), vec2(0.0, 0.5)));
   if (eD > 0.5) d = min(d, seg(f, vec2(0.0), vec2(0.0, -0.5)));
   float deg = eR + eL + eU + eD;
-  float lw = 0.012;
-  float line = smoothstep(lw + 0.012, lw, d) * step(0.5, deg);
-  float nd = abs(length(f) - 0.08) - 0.009;
-  float node = ((deg > 0.5 && deg < 1.5) || deg > 2.5) ? smoothstep(0.012, 0.0, nd) : 0.0;
+  float lw = 0.011;
+  float line = smoothstep(lw + 0.01, lw, d) * step(0.5, deg);
+  float nd = abs(length(f) - 0.075) - 0.008;
+  float node = ((deg > 0.5 && deg < 1.5) || deg > 2.5) ? smoothstep(0.011, 0.0, nd) : 0.0;
   float phase = hash21(id + salt) * 10.0 - uTime * 0.3;
   float flow = smoothstep(0.88, 1.0, fract(phase));
   return vec3(line, node, flow);
 }
 void main(){
   float L = 0.0;
+  vec3 fogCol = vec3(0.0);
+  vec3 latCol = vec3(0.0);
   for (int i = 0; i < LIGHTS; i++) {
     vec4 l = uLights[i];
     vec2 dd = vWorld - l.xy;
-    L += l.w * exp(-dot(dd, dd) / (l.z * l.z));
+    float d2 = dot(dd, dd);
+    float g = exp(-d2 / (l.z * l.z));
+    float f = exp(-d2 / (l.z * l.z * 2.4));
+    L += l.w * g;
+    latCol += uLightCol[i] * l.w * g;
+    fogCol += uLightCol[i] * l.w * f;
   }
+  vec3 tint = L > 0.001 ? latCol / L : vec3(0.3, 0.4, 0.7);
   vec3 c1 = circuit(vWorld, 0.78, 0.0);
   vec3 c2 = circuit(vWorld + 13.7, 0.27, 5.0);
-  float pat = (c1.x * 0.6 + c1.y * 1.0 + c1.z * c1.x * 1.6) + 0.75 * (c2.x * 0.5 + c2.y * 0.8 + c2.z * c2.x * 1.2);
+  float deep = smoothstep(0.25, 1.1, L);
+  float pat = (c1.x * 0.55 + c1.y * 1.0 + c1.z * c1.x * 1.5) + 0.8 * deep * (c2.x * 0.45 + c2.y * 0.8 + c2.z * c2.x * 1.1);
   vec2 df = vWorld - uFocus;
-  float focusFade = exp(-dot(df, df) / (30.0 * 30.0));
-  vec3 tint = mix(uTintA, uTintB, 0.5 + 0.5 * sin(vWorld.x * 0.07 + vWorld.y * 0.05));
-  float I = (0.0012 * uReveal + L * 0.085) * pat * focusFade;
-  gl_FragColor = vec4(tint * I, 1.0);
+  float focusFade = exp(-dot(df, df) / (28.0 * 28.0));
+  // true black away from light; circuitry and fog only exist where something illuminates them
+  // darker overall: circuitry and haze exist only inside pools of light, and brighten steeply toward their source
+  float lit = pow(clamp(L, 0.0, 3.0), 1.3);
+  vec3 col = tint * (lit * 0.115) * pat * focusFade * uReveal + fogCol * 0.011 * focusFade * uReveal;
+  gl_FragColor = vec4(col, 1.0);
   #include <colorspace_fragment>
 }
 `;
@@ -415,6 +466,8 @@ uniform vec3 uCenter;
 uniform vec3 uBox;
 uniform float uPx;
 uniform float uActivity;
+uniform vec4 uLights[8];
+uniform vec3 uLightCol[8];
 varying float vAlpha;
 varying vec3 vTone;
 void main(){
@@ -426,15 +479,26 @@ void main(){
   vec3 rel = p - uCenter;
   rel = mod(rel + uBox * 0.5, uBox) - uBox * 0.5;
   p = uCenter + rel;
+  // dust catches light: it only really exists near the scene's emitters
+  float lit = 0.0;
+  vec3 litCol = vec3(0.0);
+  for (int i = 0; i < LIGHTS; i++) {
+    vec4 l = uLights[i];
+    vec2 dd = p.xy - l.xy;
+    float g = exp(-dot(dd, dd) / (l.z * l.z * 0.9)) * l.w;
+    lit += g;
+    litCol += uLightCol[i] * g;
+  }
   vec4 mv = viewMatrix * vec4(p, 1.0);
   gl_Position = projectionMatrix * mv;
   float depth = -mv.z;
-  float size = (0.6 + aSeed.w * 2.2) * (1.0 + uActivity * 0.8);
+  float size = (0.5 + aSeed.w * 1.9) * (1.0 + uActivity * 0.8) * (1.0 + lit * 0.7);
   gl_PointSize = size * uPx * (22.0 / max(depth, 1.0));
   float edge = 1.0 - pow(length(rel.xy / (uBox.xy * 0.5)), 3.0);
-  float tw = 0.55 + 0.45 * sin(uTime * (0.6 + aSeed.w * 2.0) + aSeed.x * 60.0);
-  vAlpha = clamp(edge, 0.0, 1.0) * tw * (0.35 + aSeed.w * 0.65) * (1.0 + uActivity * 1.4);
-  vTone = mix(vec3(0.25, 0.6, 1.0), vec3(0.7, 0.45, 1.0), fract(aSeed.x * 5.0));
+  float tw = 0.5 + 0.5 * sin(uTime * (0.5 + aSeed.w * 1.8) + aSeed.x * 60.0);
+  vAlpha = clamp(edge, 0.0, 1.0) * tw * (0.25 + aSeed.w * 0.6) * (0.4 + uActivity * 1.2 + lit * 3.0);
+  vTone = mix(vec3(0.62, 0.8, 1.0), vec3(0.9, 0.78, 1.0), fract(aSeed.x * 5.0));
+  vTone = mix(vTone, litCol / max(lit, 0.001), clamp(lit * 1.4, 0.0, 0.85));
 }
 `;
 
@@ -444,8 +508,8 @@ varying vec3 vTone;
 void main(){
   vec2 c = gl_PointCoord - 0.5;
   float r = dot(c, c) * 4.0;
-  float a = exp(-r * 5.0) * vAlpha;
-  gl_FragColor = vec4(vTone * a * 0.7, 1.0);
+  float a = exp(-r * 6.0) * vAlpha;
+  gl_FragColor = vec4(vTone * a * 0.55, 1.0);
   #include <colorspace_fragment>
 }
 `;
@@ -515,12 +579,13 @@ void main(){
   float x = dot(p, uDir);
   float y = dot(p, vec2(-uDir.y, uDir.x));
   float r2 = x * x + y * y;
-  float core = exp(-r2 * 160.0);
-  float halo = exp(-r2 * 14.0);
-  float tail = step(x, 0.0) * exp(-y * y * 700.0) * exp(x * 3.2);
-  float star = (exp(-abs(y) * 55.0) * exp(-abs(x) * 5.0) + exp(-abs(x) * 55.0) * exp(-abs(y) * 5.0)) * 0.45;
-  float flick = 0.9 + 0.1 * sin(uTime * 40.0);
-  vec3 col = vec3(1.0) * core * 2.6 + uColor * (halo * 0.9 + tail * 1.3 + star) * flick;
+  float core = exp(-r2 * 170.0);
+  float halo = exp(-r2 * 13.0);
+  float tail = step(x, 0.0) * exp(-y * y * 800.0) * exp(x * 3.0);
+  float star = (exp(-abs(y) * 60.0) * exp(-abs(x) * 5.0) + exp(-abs(x) * 60.0) * exp(-abs(y) * 5.0)) * 0.5;
+  float streak = exp(-abs(y) * 120.0) * exp(-abs(x) * 1.6) * 0.25;
+  float flick = 0.92 + 0.08 * sin(uTime * 40.0);
+  vec3 col = vec3(1.0) * core * 2.8 + uColor * (halo * 0.95 + tail * 1.4 + star + streak) * flick;
   gl_FragColor = vec4(col * uAmp, 1.0);
   #include <colorspace_fragment>
 }
@@ -545,12 +610,12 @@ void main(){
   float r = length(vUv);
   float e = 1.0 - pow(1.0 - uAge, 3.0);
   float R = 0.08 + e * 0.9;
-  float w = 0.02 + 0.05 * (1.0 - uAge);
+  float w = 0.014 + 0.04 * (1.0 - uAge);
   float ring = exp(-pow((r - R) / w, 2.0));
   float R2 = 0.06 + e * 0.62;
   float ring2 = exp(-pow((r - R2) / (w * 0.6), 2.0)) * 0.6;
   float fade = pow(1.0 - uAge, 1.4);
-  vec3 col = uColor * (ring + ring2) * fade * 1.4 + vec3(1.0) * ring * fade * 0.5;
+  vec3 col = uColor * (ring + ring2) * fade * 1.5 + vec3(1.0) * ring * fade * 0.55;
   gl_FragColor = vec4(col, 1.0);
   #include <colorspace_fragment>
 }

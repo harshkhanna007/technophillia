@@ -146,6 +146,8 @@ export class BranchMesh {
   private traceMesh: THREE.Mesh | null = null;
   private partMesh: THREE.Mesh | null = null;
   private detailBuilt = false;
+  /** world-space (x,y) samples of everything this branch draws, used to keep labels off the strands */
+  obstacles: Float32Array = new Float32Array(0);
   private disposables: { dispose(): void }[] = [];
 
   constructor(
@@ -158,6 +160,12 @@ export class BranchMesh {
     this.node = node;
     const rng = new Rng(node.id + ':trunk');
     this.trunk = generateTrunk(node, parentPos, parentZ, startHeading, rng);
+    {
+      const pts = this.trunk.pts;
+      const arr: number[] = [];
+      for (let i = 0; i < pts.length; i += 4) arr.push(pts[i].x, pts[i].y);
+      this.obstacles = new Float32Array(arr);
+    }
 
     this.u = {
       uTime: shared.uTime,
@@ -223,6 +231,11 @@ export class BranchMesh {
       },
     ];
     for (const l of detail.lines) lines.push({ ...l, kind: 1 });
+    {
+      const extra: number[] = Array.from(this.obstacles);
+      for (const l of detail.lines) for (let i = 0; i < l.pts.length; i += 3) extra.push(l.pts[i].x, l.pts[i].y);
+      this.obstacles = new Float32Array(extra);
+    }
     const geo = buildRibbon(lines);
     const mat = new THREE.ShaderMaterial({ uniforms: this.u, vertexShader: TRACE_VERT, fragmentShader: TRACE_FRAG, ...additive });
     this.traceMesh = new THREE.Mesh(geo, mat);

@@ -67,6 +67,14 @@ export class AudioEngine {
     this.startAmbient();
   }
 
+  /** battery friendly: stop the audio graph while the tab is in the background */
+  setHidden(hidden: boolean) {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    if (hidden) void ctx.suspend();
+    else void ctx.resume();
+  }
+
   setMuted(m: boolean) {
     this.muted = m;
     try {

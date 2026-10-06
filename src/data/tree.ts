@@ -1,6 +1,6 @@
 /**
  * ──────────────────────────────────────────────────────────────────────────
- *  THE TREE — everything the engine grows comes from this file.
+ *  THE TREE, everything the engine grows comes from this file.
  *
  *  • Add / rename / reorder categories, children and grandchildren freely.
  *    Nesting can go as deep as you like; the layout engine re-partitions the
@@ -15,7 +15,7 @@ import type { CategoryData, ExperienceMeta } from '@/engine/types';
 
 export const meta: ExperienceMeta = {
   wordmark: 'TECHNOPHILIA',
-  hint: 'select a node to grow the tree',
+  hint: 'Select a node to begin',
 };
 
 export const categories: CategoryData[] = [
@@ -23,8 +23,8 @@ export const categories: CategoryData[] = [
   {
     title: 'ARTIFICIAL INTELLIGENCE',
     style: 'neural',
-    palette: { a: '#1fd9ff', b: '#4b7dff', accent: '#bff6ff' },
-    description: 'Machines that learn, perceive and reason — the engine of the next decade.',
+    palette: { a: '#14c8ff', b: '#2f6bff', accent: '#c8f3ff' },
+    description: 'Machines that learn, perceive and reason, the engine of the next decade.',
     children: [
       {
         title: 'MACHINE LEARNING',
@@ -68,8 +68,8 @@ export const categories: CategoryData[] = [
   {
     title: 'ROBOTICS',
     style: 'mechanical',
-    palette: { a: '#3d8bff', b: '#7cc4ff', accent: '#ffffff' },
-    description: 'Intelligence given a body — sensing, deciding and acting in the physical world.',
+    palette: { a: '#4f7dff', b: '#a9c2ff', accent: '#ffffff' },
+    description: 'Intelligence given a body, sensing, deciding and acting in the physical world.',
     children: [
       {
         title: 'AUTONOMOUS MACHINES',
@@ -113,8 +113,8 @@ export const categories: CategoryData[] = [
   {
     title: 'SUSTAINABILITY',
     style: 'organic',
-    palette: { a: '#25f2c4', b: '#2aa9ff', accent: '#d8fff0' },
-    description: 'Technology that heals rather than consumes — design with the planet inside the loop.',
+    palette: { a: '#10e0a0', b: '#12a8ff', accent: '#d4fff0' },
+    description: 'Technology that heals rather than consumes, design with the planet inside the loop.',
     children: [
       {
         title: 'CLEAN ENERGY',
@@ -158,15 +158,15 @@ export const categories: CategoryData[] = [
   {
     title: 'INNOVATION',
     style: 'chaotic',
-    palette: { a: '#c14bff', b: '#ff4fd8', accent: '#ffe3fb' },
-    description: 'The restless edge — where unreasonable ideas become working prototypes.',
+    palette: { a: '#ff2ec4', b: '#9b3dff', accent: '#ffd9f4' },
+    description: 'The restless edge, where unreasonable ideas become working prototypes.',
     children: [
       {
         title: 'EMERGING TECH',
         description: 'Capabilities that barely existed five years ago.',
         children: [
           { title: 'SPATIAL COMPUTING', description: 'Interfaces that live in the room with you.' },
-          { title: 'BRAIN–COMPUTER INTERFACES', description: 'Thought as an input device.' },
+          { title: 'BRAIN-COMPUTER INTERFACES', description: 'Thought as an input device.' },
           { title: 'DIGITAL TWINS', description: 'Living virtual replicas of physical systems.' },
         ],
       },
@@ -203,7 +203,7 @@ export const categories: CategoryData[] = [
   {
     title: 'FUTURE SKILLS',
     style: 'network',
-    palette: { a: '#8f7bff', b: '#35d6ff', accent: '#e6e0ff' },
+    palette: { a: '#8b5cff', b: '#4fc4ff', accent: '#eadfff' },
     description: 'What to learn so the next wave works for you, not around you.',
     children: [
       {
@@ -217,7 +217,7 @@ export const categories: CategoryData[] = [
       },
       {
         title: 'COMPUTATIONAL THINKING',
-        description: 'Breaking big problems into steps a machine — or a team — can follow.',
+        description: 'Breaking big problems into steps a machine, or a team, can follow.',
         children: [
           { title: 'ALGORITHMS', description: 'Recipes for solving problems efficiently.' },
           { title: 'SYSTEMS THINKING', description: 'Seeing the feedback loops, not just the parts.' },
@@ -248,7 +248,7 @@ export const categories: CategoryData[] = [
   {
     title: 'QUANTUM',
     style: 'quantum',
-    palette: { a: '#8ff3ff', b: '#a07bff', accent: '#ff7ae6' },
+    palette: { a: '#a8f0ff', b: '#c78bff', accent: '#ff7ae6' },
     description: 'Computation and communication at the scale where physics stops being intuitive.',
     children: [
       {
