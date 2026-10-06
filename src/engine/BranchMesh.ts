@@ -156,10 +156,11 @@ export class BranchMesh {
     parentZ: number,
     startHeading: P,
     private shared: Shared,
+    prebuilt?: Trunk,
   ) {
     this.node = node;
     const rng = new Rng(node.id + ':trunk');
-    this.trunk = generateTrunk(node, parentPos, parentZ, startHeading, rng);
+    this.trunk = prebuilt ?? generateTrunk(node, parentPos, parentZ, startHeading, rng);
     {
       const pts = this.trunk.pts;
       const arr: number[] = [];
@@ -191,7 +192,7 @@ export class BranchMesh {
 
     // ghost thread = spine only
     const gg = buildRibbon([
-      { pts: this.trunk.pts, zs: this.trunk.z, t0: 0, t1: 1, w: 0.016, b: 0.5, kind: 2, seed: 0.5 },
+      { pts: this.trunk.pts, zs: this.trunk.z, t0: 0, t1: 1, w: node.depth <= 1 ? 0.052 : node.depth === 2 ? 0.042 : node.depth === 3 ? 0.034 : node.depth === 4 ? 0.028 : 0.021, b: 0.5, kind: 2, seed: 0.5, taper: 0.62 },
     ]);
     const gm = new THREE.ShaderMaterial({ uniforms: this.ghostU, vertexShader: TRACE_VERT, fragmentShader: TRACE_FRAG, ...additive });
     this.ghostMesh = new THREE.Mesh(gg, gm);
@@ -215,7 +216,8 @@ export class BranchMesh {
     const L = this.trunk.len;
     const reach = Math.max(0.28, Math.min(1.5, node.clearance * 0.36, L * 0.26));
     const dens = density * Math.min(1, Math.max(0.55, L / 5.5));
-    const detail = buildDetail(node.style, this.trunk, rng, reach, dens);
+    // the trunk is pure form: a luminous core and grain, no ornament
+    const detail: DetailOut = node.depth === 0 ? { lines: [], parts: [] } : buildDetail(node.style, this.trunk, rng, reach, dens);
 
     const lines: RibbonLine[] = [
       {
@@ -223,14 +225,34 @@ export class BranchMesh {
         zs: this.trunk.z,
         t0: 0,
         t1: 1,
-        w: node.depth === 1 ? 0.05 : node.depth === 2 ? 0.042 : 0.036,
+        w: node.depth === 0 ? 0.07 : node.depth === 1 ? 0.05 : node.depth === 2 ? 0.042 : 0.036,
         b: 1,
         kind: 0,
         seed: 0.37,
-        taper: 0.3,
+        taper: node.depth === 0 ? 0.45 : 0.3,
       },
     ];
     for (const l of detail.lines) lines.push({ ...l, kind: 1 });
+    if (node.depth === 0) {
+      // bark grain: parallel fibres that fan wide at the root and draw together toward the crown
+      const fibres = [-1, -0.62, -0.28, 0.28, 0.62, 1];
+      const steps = Math.ceil(L / 0.09);
+      fibres.forEach((k, fi) => {
+        const pts: P[] = [];
+        const zs: number[] = [];
+        for (let i = 0; i <= steps; i++) {
+          const s = (L * i) / steps;
+          const u = s / L;
+          const f = this.trunk.at(s);
+          const half = 0.1 + 0.95 * Math.pow(1 - u, 1.5);
+          // the grain breathes a little so it never looks ruled
+          const o = k * half * (1 + 0.1 * Math.sin(s * 0.85 + fi * 1.7));
+          pts.push({ x: f.x + f.nx * o, y: f.y + f.ny * o });
+          zs.push(f.z);
+        }
+        lines.push({ pts, zs, t0: 0, t1: 1, w: 0.019 - Math.abs(k) * 0.005, b: 0.5 + (1 - Math.abs(k)) * 0.3, kind: 1, seed: 0.13 + fi * 0.17 });
+      });
+    }
     {
       const extra: number[] = Array.from(this.obstacles);
       for (const l of detail.lines) for (let i = 0; i < l.pts.length; i += 3) extra.push(l.pts[i].x, l.pts[i].y);

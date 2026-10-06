@@ -16,12 +16,23 @@ export class CameraRig {
   readonly follow = new THREE.Vector3();
   followAmt = 0;
   followTarget = 0;
+  /** the auto-framing the engine asked for; user zoom/pan are layered on top of it */
+  private base: Framing = { fx: 0, fy: 0, dist: 36 };
+  /** multiplier on the auto distance (wheel / pinch), 1 = what the engine framed */
+  userZoom = 1;
+  readonly pan = new THREE.Vector2();
+  /** hard limits for the user's own zoom and pan */
+  minDist = 5.5;
+  maxDist = 120;
+  private bounds = { x0: -1e3, x1: 1e3, y0: -1e3, y1: 1e3 };
   readonly pointer = new THREE.Vector2();
   readonly pTarget = new THREE.Vector2();
   rate = 1.25;
   reduced = false;
   private kick = 0;
   private kickV = 0;
+  private roll = 0;
+  private rollV = 0;
   private tanH: number;
   private look = new THREE.Vector3();
 
@@ -54,19 +65,70 @@ export class CameraRig {
   }
 
   setTarget(f: Framing, rate = 1.25) {
-    this.tFocus.set(f.fx, f.fy, 0);
-    this.tDist = f.dist;
+    this.base = f;
     this.rate = rate;
+    this.applyTarget();
   }
 
   snap(f: Framing) {
-    this.tFocus.set(f.fx, f.fy, 0);
+    this.base = f;
+    this.userZoom = 1;
+    this.pan.set(0, 0);
+    this.applyTarget();
     this.focus.copy(this.tFocus);
-    this.tDist = this.dist = f.dist;
+    this.dist = this.tDist;
+  }
+
+  /** the world rectangle the user may pan within (the whole tree plus a margin) */
+  setBounds(x0: number, x1: number, y0: number, y1: number) {
+    this.bounds = { x0, x1, y0, y1 };
+    this.applyTarget();
+  }
+
+  /** back to the auto camera: called whenever the story moves to a new level */
+  resetView() {
+    this.userZoom = 1;
+    this.pan.set(0, 0);
+    this.applyTarget();
+  }
+
+  get userAdjusted() {
+    return Math.abs(this.userZoom - 1) > 0.02 || this.pan.lengthSq() > 0.01;
+  }
+
+  private applyTarget() {
+    const b = this.bounds;
+    const fx = Math.max(b.x0, Math.min(b.x1, this.base.fx + this.pan.x));
+    const fy = Math.max(b.y0, Math.min(b.y1, this.base.fy + this.pan.y));
+    this.pan.set(fx - this.base.fx, fy - this.base.fy);
+    this.tFocus.set(fx, fy, 0);
+    this.tDist = Math.max(this.minDist, Math.min(this.maxDist, this.base.dist * this.userZoom));
+  }
+
+  /** zoom by `factor` (<1 = in) keeping the world point (wx, wy) under the pointer */
+  zoomAbout(factor: number, wx: number, wy: number) {
+    const oldD = this.tDist;
+    const wantD = Math.max(this.minDist, Math.min(this.maxDist, oldD * factor));
+    const ratio = wantD / oldD;
+    this.userZoom = wantD / this.base.dist;
+    this.pan.set(wx + (this.tFocus.x - wx) * ratio - this.base.fx, wy + (this.tFocus.y - wy) * ratio - this.base.fy);
+    this.applyTarget();
+  }
+
+  /** shift the camera by a world-space delta */
+  panBy(dx: number, dy: number) {
+    this.pan.x += dx;
+    this.pan.y += dy;
+    this.applyTarget();
   }
 
   impulse(v: number) {
     this.kickV += v;
+  }
+
+  /** a short rotational shudder, the weight of something landing */
+  shake(v: number) {
+    this.rollV += v;
   }
 
   update(dt: number, time: number) {
@@ -81,6 +143,8 @@ export class CameraRig {
     // soft spring for impact kick (push-in then settle)
     this.kickV += (-this.kick * 38 - this.kickV * 7) * dt;
     this.kick += this.kickV * dt;
+    this.rollV += (-this.roll * 55 - this.rollV * 6.5) * dt;
+    this.roll += this.rollV * dt;
 
     this.pointer.x += (this.pTarget.x - this.pointer.x) * (1 - Math.exp(-dt * 2.4));
     this.pointer.y += (this.pTarget.y - this.pointer.y) * (1 - Math.exp(-dt * 2.4));
@@ -92,6 +156,6 @@ export class CameraRig {
     this.camera.position.set(this.focus.x + px, this.focus.y + py, this.dist + this.kick);
     this.look.set(this.focus.x - px * 0.4, this.focus.y - py * 0.4, 0);
     this.camera.lookAt(this.look);
-    if (!this.reduced) this.camera.rotateZ(-this.pointer.x * 0.006);
+    if (!this.reduced) this.camera.rotateZ(-this.pointer.x * 0.006 + this.roll);
   }
 }

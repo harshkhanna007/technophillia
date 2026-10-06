@@ -235,9 +235,16 @@ export function generateTrunk(node: TreeNode, A: P, zA: number, startHeading: P,
   const n = Math.max(24, Math.ceil(D / step));
   let poly: P[];
 
+  if (node.depth === 1) {
+    // a bough leaves the trunk steeply and bends outward in one clean arc, whatever its style
+    const out = norm(Math.cos(node.angle), Math.sin(node.angle));
+    poly = meander(hermite(A, B, startHeading, out, 1.3, 0.95, n), lat * 0.2, 1.2, rng.next() * TAU);
+    return new Trunk(resample(poly, step), zA, node.pos.z);
+  }
+
   switch (node.style) {
     case 'mechanical':
-      poly = manhattan(A, B, rng);
+      poly = node.depth === 1 ? meander(hermite(A, B, startHeading, endDir, 1.0, 1.0, n), lat * 0.2, 1.1, rng.next() * TAU) : manhattan(A, B, rng);
       break;
     case 'chaotic':
       poly = jagged(A, B, rng, lat);

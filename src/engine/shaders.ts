@@ -71,10 +71,11 @@ void main(){
   if (uGhost > 0.5) {
     float reveal = smoothstep(t, t + 0.012, uProgress);
     if (reveal < 0.003) discard;
-    float ph = fract(u * 2.4 - uTime * 0.1);
-    float dash = smoothstep(0.1, 0.3, ph) * (1.0 - smoothstep(0.55, 0.8, ph));
+    // a solid living bough: steady body plus a slow swell of light travelling toward the bud
+    float sheen = pow(0.5 + 0.5 * sin(u * 0.5 - uTime * 0.85 + seed * 6.0), 3.0);
     float head = exp(-max(uProgress - t, 0.0) * 24.0);
-    float I = (core * 0.8 + halo * 0.14) * (1.0 - smoothstep(0.45, 1.0, d)) * reveal * (0.055 + 0.15 * dash + head * 0.9);
+    float body = 0.2 + 0.62 * sheen;
+    float I = (core * 0.85 + halo * 0.4 + aura * 0.2) * (1.0 - smoothstep(0.45, 1.0, d)) * reveal * (body + head * 1.1);
     col = mix(uColA, uColB, t) * I * uDim * uBoost;
   } else {
     float reveal = smoothstep(t, t + 0.004, uProgress);
@@ -257,17 +258,24 @@ void main(){
 
   float halo = exp(-r * r * 7.5) * (0.1 + 0.4 * act + 0.32 * hov + flare * 0.7);
 
+  // a hairline tick ring just outside the main ring, like a dial
+  float tickMask = step(0.55, fract(ang / 6.2831853 * 48.0 + 0.5));
+  float ticks = exp(-pow((r - 0.52) / 0.007, 2.0)) * tickMask * (0.12 + 0.4 * hov + 0.25 * act);
+  // anamorphic streak: a thin blade of light through the bead
+  float streak = exp(-abs(q.y) * mix(52.0, 30.0, hov)) * exp(-abs(q.x) * 1.5) * (0.1 + 0.55 * hov + 0.5 * act + flare * 1.1);
+
   vec3 hot = mix(vAccent, vec3(1.0), 0.82);
-  vec3 col = vColA * (ring + arcs + halo * 0.85 + coreGlow * 0.45);
+  vec3 col = vColA * (ring + arcs + ticks + halo * 0.85 + coreGlow * 0.45);
   col += mix(vColA, hot, 0.55) * core * (0.85 + act * 0.6);
   col += hot * (coreGlow * (act * 1.3 + hov * 0.5) + flare * exp(-r * r * 18.0) * 1.2);
+  col += mix(vColA, hot, 0.5) * streak;
   col *= 1.0 - smoothstep(1.4, 2.3, r);
   gl_FragColor = vec4(col * vis, 1.0);
   #include <colorspace_fragment>
 }
 `;
 
-/* ───────────────────────── seed: an armillary of light ───────────────────────── */
+/* ───────────────────────── seed: an almond of light, cracking open into a shoot and roots ───────────────────────── */
 export const SEED_VERT = /* glsl */ `
 varying vec2 vP;
 uniform float uExtent;
@@ -283,30 +291,22 @@ uniform float uAppear;
 uniform float uEnergy;
 uniform float uFlare;
 uniform float uHover;
+uniform float uSprout;
 uniform vec3 uColA;
 uniform vec3 uColB;
 uniform vec3 uHot;
 uniform float uExtent;
 uniform float uScale;
-uniform vec2 uDirs[8];
-uniform int uDirCount;
 varying vec2 vP;
 const float TAU = 6.28318530718;
-vec2 rot(vec2 p, float a){ float c = cos(a); float s = sin(a); return vec2(c * p.x - s * p.y, s * p.x + c * p.y); }
 
-// tilted orbit: returns hairline intensity, depth (-1 behind .. 1 in front)
-float orbit(vec2 p, float R, float tilt, float rotA, float w, out float depth){
-  vec2 q = rot(p, -rotA);
-  float ct = cos(tilt);
-  q.y /= ct;
-  float d = abs(length(q) - R) * mix(1.0, ct, 0.6);
-  depth = q.y / R;
-  return exp(-pow(d / w, 2.0));
-}
-
-vec2 orbitPoint(float R, float tilt, float rotA, float t){
-  vec2 b = vec2(cos(t), sin(t) * cos(tilt)) * R;
-  return rot(b, rotA);
+// almond (vesica piscis): half height 0.27, half width 0.125
+float sdSeed(vec2 p){
+  p = abs(p);
+  const float R = 0.3542;
+  const float D = 0.2292;
+  const float B = 0.27;
+  return ((p.y - B) * D > p.x * B) ? length(p - vec2(0.0, B)) : length(p - vec2(-D, 0.0)) - R;
 }
 
 void main(){
@@ -315,59 +315,84 @@ void main(){
   float breathe = 1.0 + 0.035 * sin(T * 1.6);
   vec2 p = vP / (ap * breathe * uScale);
   float r = length(p);
-  float a = atan(p.y, p.x);
+  float sp = clamp(uSprout, 0.0, 1.0);
   vec3 col = vec3(0.0);
 
   // atmosphere
   col += uColB * exp(-r * r * 12.0) * 0.17 + uColA * exp(-r * 3.4) * 0.04 * (1.0 + uEnergy);
 
-  // the seed itself: white-hot kernel wrapped in a living plasma
-  float core = exp(-r * r * 260.0);
-  float swirl = 0.5 + 0.5 * sin(a * 3.0 + T * 0.8 + sin(r * 34.0 - T * 1.7) * 1.7);
+  // the seed itself: white-hot kernel wrapped in a living plasma, held inside the almond
+  vec2 q = vec2(p.x * 1.9, p.y);
+  float rq = length(q);
+  float aq = atan(q.y, q.x);
+  float sd = sdSeed(p);
+  float inside = 1.0 - smoothstep(-0.012, 0.004, sd);
+  float core = exp(-rq * rq * 260.0);
+  float swirl = 0.5 + 0.5 * sin(aq * 3.0 + T * 0.8 + sin(rq * 34.0 - T * 1.7) * 1.7);
   col += uHot * core * (2.1 + uEnergy * 1.6 + uHover * 0.7);
-  col += mix(uColA, uColB, swirl) * exp(-r * r * 75.0) * (0.75 + 0.35 * swirl);
+  col += mix(uColA, uColB, swirl) * exp(-rq * rq * 38.0) * (0.75 + 0.35 * swirl) * (0.5 + 0.5 * inside);
 
   // glass shell with a chromatic fringe
   for (int c = 0; c < 3; c++) {
-    float rr = 0.122 + float(c) * 0.0065;
-    float ring = exp(-pow((r - rr) / 0.0045, 2.0));
+    float ring = exp(-pow((sd - float(c) * 0.0065) / 0.0045, 2.0));
     vec3 tint = c == 0 ? vec3(1.0, 0.32, 0.62) : (c == 1 ? vec3(0.3, 1.0, 0.82) : vec3(0.38, 0.55, 1.0));
     col += tint * ring * 0.55;
   }
 
-  // three precessing orbits, each with a bead of light
-  for (int k = 0; k < 3; k++) {
-    float fk = float(k);
-    float R = 0.3 + 0.16 * fk;
-    float tilt = 1.18 - 0.22 * fk + 0.14 * sin(T * 0.2 + fk * 1.3);
-    float rotA = T * (0.085 + 0.035 * fk) * (mod(fk, 2.0) * 2.0 - 1.0) + fk * 1.7;
-    float depth;
-    float o = orbit(p, R, tilt, rotA, 0.0042 + 0.0008 * fk, depth);
-    float vis = 0.3 + 0.7 * smoothstep(-0.6, 0.8, depth);
-    col += mix(uColA, uColB, fk / 2.0) * o * vis * (0.95 + uEnergy);
-    float tb = T * (0.65 + 0.24 * fk) + fk * 2.1;
-    vec2 bp = orbitPoint(R, tilt, rotA, tb);
-    float bead = exp(-dot(p - bp, p - bp) * 1500.0);
-    col += uHot * bead * (0.5 + 1.0 * smoothstep(-0.5, 0.9, sin(tb))) * 1.5;
+  // the seam: a hairline that splits open from the tip as the seed germinates
+  float jag = 0.011 * sin(p.y * 62.0 + 1.0) + 0.006 * sin(p.y * 131.0 + 2.0);
+  float crackTop = 0.262;
+  float crackLen = 0.1 + 0.46 * sp;
+  float cm = smoothstep(crackTop - crackLen, crackTop - crackLen + 0.05, p.y) * (1.0 - smoothstep(crackTop, crackTop + 0.01, p.y));
+  float cd = abs(p.x - jag);
+  col += uHot * exp(-pow(cd / 0.0042, 2.0)) * cm * inside * (0.5 + 1.2 * sp + uEnergy);
+  col += uColA * exp(-pow(cd / 0.03, 2.0)) * cm * inside * 0.28 * (0.3 + sp);
+
+  // the shoot: climbs out of the tip, ending in a bead where the stem takes over
+  float tipY = 0.27 + 0.33 * sp;
+  float along = p.y - 0.27;
+  float sway = 0.01 * sin(p.y * 16.0 - T * 0.7) * smoothstep(0.27, 0.45, p.y) * (1.0 - smoothstep(0.5, 0.6, p.y));
+  float sw = 0.0042 + 0.003 * smoothstep(0.0, 0.33, along);
+  float shoot = exp(-pow((p.x - sway) / sw, 2.0)) * smoothstep(0.0, 0.03, along) * (1.0 - smoothstep(tipY - 0.02, tipY, p.y));
+  float flow = pow(smoothstep(0.8, 1.0, fract(along * 5.0 - T * 0.9)), 2.0);
+  col += mix(uColA, uHot, 0.35) * shoot * (0.35 + flow * 1.7 + uEnergy * 0.9);
+  vec2 tip = vec2(0.01 * sin(tipY * 16.0 - T * 0.7) * smoothstep(0.27, 0.45, tipY) * (1.0 - smoothstep(0.5, 0.6, tipY)), tipY);
+  col += uHot * exp(-dot(p - tip, p - tip) * 2800.0) * (0.75 + 0.25 * sin(T * 2.0)) * smoothstep(0.05, 0.4, sp);
+
+  // two seed leaves unfurl from the stem
+  float leaf = smoothstep(0.3, 0.9, sp);
+  for (int s = 0; s < 2; s++) {
+    float sg = s == 0 ? 1.0 : -1.0;
+    vec2 c = vec2(sg * 0.075, 0.345);
+    vec2 v = p - c;
+    float ang = atan(v.y, v.x * sg);
+    float dl = abs(length(v) - 0.075);
+    float unfurl = smoothstep(3.1416 * (1.0 - leaf) - 0.15, 3.1416 * (1.0 - leaf), ang);
+    float line = exp(-pow(dl / 0.0034, 2.0)) * step(0.0, v.y) * unfurl * smoothstep(0.12, 0.4, ang);
+    col += mix(uColA, uHot, 0.3) * line * (0.6 + 0.4 * sin(T * 1.5 + sg)) * leaf;
+    vec2 lt = c + vec2(sg * cos(0.3), sin(0.3)) * 0.075;
+    col += uHot * exp(-dot(p - lt, p - lt) * 3200.0) * leaf * 0.8;
   }
 
-  // one sprout per branch direction, ending in a bead where the trace takes over
-  for (int i = 0; i < 8; i++) {
-    if (i >= uDirCount) break;
-    vec2 dir = uDirs[i];
-    float along = dot(p, dir);
-    float perp = dot(p, vec2(-dir.y, dir.x));
-    float w = 0.0042 + 0.003 * smoothstep(0.1, 0.5, along);
-    float spike = exp(-pow(perp / w, 2.0)) * smoothstep(0.17, 0.25, along) * (1.0 - smoothstep(0.5, 0.62, along));
-    float flow = pow(smoothstep(0.8, 1.0, fract(along * 2.2 - T * 0.55 + float(i) * 0.21)), 2.0);
-    col += mix(uColA, uHot, 0.35) * spike * (0.35 + flow * 1.7 + uEnergy * 0.9);
-    vec2 tip = dir * 0.6;
-    col += uHot * exp(-dot(p - tip, p - tip) * 2800.0) * (0.75 + 0.25 * sin(T * 2.0 + float(i)));
+  // roots feel their way down, sap flowing back up toward the seed
+  float ty = -p.y - 0.27;
+  float rootsAmt = smoothstep(0.0, 1.0, sp * 1.15);
+  for (int i = 0; i < 5; i++) {
+    float fi = float(i);
+    float dirn = fi - 2.0;
+    float len = (0.62 - abs(dirn) * 0.07) * rootsAmt;
+    float xr = dirn * 0.12 * pow(max(ty, 0.0), 0.9) + 0.012 * sin(ty * 22.0 + fi * 2.0);
+    float wr = 0.0036 * (1.0 - 0.6 * clamp(ty / 0.6, 0.0, 1.0)) + 0.0006;
+    float m = step(0.0, ty) * (1.0 - smoothstep(len - 0.03, len, ty));
+    float rl = exp(-pow((p.x - xr) / wr, 2.0)) * m;
+    float sap = pow(smoothstep(0.8, 1.0, fract(ty * 3.2 + T * 0.5 + fi * 0.31)), 2.0);
+    col += mix(uColA, uColB, 0.5) * rl * (0.22 + sap * 1.0 + uEnergy * 0.4);
   }
 
-  // fine measuring scale and a ring of dust
-  col += uColA * exp(-pow((r - 0.84) / 0.0028, 2.0)) * step(0.7, fract(a / TAU * 60.0)) * 0.14;
-  col += uColB * exp(-pow((r - 0.93) / 0.004, 2.0)) * step(0.82, fract(a / TAU * 48.0 + T * 0.012)) * 0.3;
+  // fine measuring scale along the ground, and a line of dust beneath it
+  float gx = 1.0 - smoothstep(0.55, 1.5, abs(p.x));
+  col += uColA * exp(-pow((p.y + 0.31) / 0.0028, 2.0)) * (0.05 + step(0.7, fract(p.x * 30.0)) * 0.14) * gx;
+  col += uColB * exp(-pow((p.y + 0.37) / 0.004, 2.0)) * step(0.82, fract(p.x * 24.0 + T * 0.012)) * 0.3 * gx;
 
   // breathing wave and ignition flare
   float pr = fract(T * 0.16);
@@ -451,7 +476,10 @@ void main(){
   // true black away from light; circuitry and fog only exist where something illuminates them
   // darker overall: circuitry and haze exist only inside pools of light, and brighten steeply toward their source
   float lit = pow(clamp(L, 0.0, 3.0), 1.3);
-  vec3 col = tint * (lit * 0.115) * pat * focusFade * uReveal + fogCol * 0.011 * focusFade * uReveal;
+  vec3 col = tint * (lit * 0.085) * pat * focusFade * uReveal + fogCol * 0.03 * focusFade * uReveal;
+  // keep the spill saturated: it is coloured light on black, never grey haze
+  float lum = dot(col, vec3(0.333));
+  col = max(mix(vec3(lum), col, 1.55), 0.0);
   gl_FragColor = vec4(col, 1.0);
   #include <colorspace_fragment>
 }

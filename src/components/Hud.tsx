@@ -31,13 +31,13 @@ export default function Hud({ state, meta, onHome, onSelect, onMute }: Props) {
               </button>
             </div>
           ))}
-          <span className="hint" data-show={state?.intro && depth === 0 && !state.busy ? 1 : 0}>
-            {meta.hint}
+          <span className="hint" data-show={(state?.ready && !state.started) || (state?.intro && depth === 0 && !state.busy) ? 1 : 0}>
+            {state?.started ? meta.hint : meta.seedHint}
           </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
           <span className="keys" data-show={depth > 0 ? 1 : 0}>
-            Esc to retract
+            Esc retract · scroll zoom · F focus
           </span>
           <button type="button" className="sound" data-muted={muted ? 1 : 0} onClick={onMute} aria-pressed={!muted} aria-label={muted ? 'Unmute sound' : 'Mute sound'}>
             <span className="sound__bars" aria-hidden="true">

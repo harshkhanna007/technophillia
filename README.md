@@ -1,8 +1,8 @@
 # TECHNOPHILIA: grow the tree
 
-An interactive digital art installation. A single glowing seed in the dark; six independent
-technological organisms that you *grow* by clicking nodes. No scrolling, no menus: the tree is the
-interface.
+An interactive digital art installation. A single glowing seed in the dark cracks open and sends up
+a stem; six independent technological branches leave it, left and right, and you *grow* them by
+clicking nodes. No menus: the tree is the interface.
 
 ```bash
 npm install
@@ -14,10 +14,13 @@ npm run build && npm start
 
 | Action | Result |
 | --- | --- |
+| Click the almond seed | The seed cracks, a shoot climbs out, the stem rises and the six buds open |
 | Click / tap a glowing node | Energy travels from the seed through the circuitry, the branch grows, the camera follows, the title ignites, child nodes bloom |
 | Click a *dim* grown node | Re-activate that branch (energy replays along its ancestry) |
 | `Esc` / `Backspace` | Retract one level: energy flows back toward the root, camera pulls out |
-| Click the seed glyph (bottom-left) / `Home` | Retract everything, the six primary territories return |
+| Click the seed glyph (bottom-left) / `Home` | Retract everything, the six primary branches return |
+| Mouse wheel / pinch | Free zoom (anchored under the pointer); drag to pan |
+| `F` / double-click empty space | Dive into the original tight close-up of the current branch; again to come back |
 | Click a breadcrumb | Jump back to that level |
 | `M` or the sound switch | Mute / unmute the synthesised sound design |
 | `Tab` / `Enter` | Every node is a real button: fully keyboard navigable |
@@ -44,7 +47,7 @@ automatically. Each category is also free to use any `style`.
 ```
 src/data/tree.ts        content (data-driven)
 src/engine/
-  layout.ts             radial-wedge layout → guarantees the six branches can never overlap
+  layout.ts             stem + side-band layout → guarantees the six branches can never overlap
   trunk.ts              per-style spine generation (hermite, PCB 45° routing, jagged, meander …)
   detail.ts             procedural circuitry that follows the spine (strands, dendrites, buses,
                         chips, tendrils, lattices, helices, orbital rings, LEDs, vias)
@@ -62,7 +65,7 @@ src/components/         thin React shell (HUD only – zero per-frame React work
 Rendering notes: ~36 draw calls with all six primaries open, <0.5 ms CPU per frame. Quality tiers
 (`src/engine/config.ts`) lower DPR / bloom / particles / circuit density on phones, and an adaptive
 monitor drops resolution if the frame rate sags. `prefers-reduced-motion` disables camera sway and
-parallax and shortens the timelines. On portrait screens the layout squashes into a tall ellipse and
+parallax and shortens the timelines. On portrait screens the tree narrows and stretches taller, and
 labels simplify (only the current node's children are labelled).
 
 ## Tech

@@ -4,7 +4,8 @@
  *
  *  • Add / rename / reorder categories, children and grandchildren freely.
  *    Nesting can go as deep as you like; the layout engine re-partitions the
- *    territory automatically so branches never collide.
+ *    territory automatically so branches never collide. Categories alternate
+ *    right / left up the trunk, in the order they are listed (first = lowest).
  *  • `style` picks the procedural personality of a branch
  *    ('neural' | 'mechanical' | 'organic' | 'chaotic' | 'network' | 'quantum').
  *  • The SIXTH category (the last entry) is a placeholder: change its title,
@@ -15,6 +16,7 @@ import type { CategoryData, ExperienceMeta } from '@/engine/types';
 
 export const meta: ExperienceMeta = {
   wordmark: 'TECHNOPHILIA',
+  seedHint: 'Click the seed to begin',
   hint: 'Select a node to begin',
 };
 

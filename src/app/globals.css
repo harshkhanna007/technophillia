@@ -128,16 +128,22 @@ body {
 }
 
 .nd[data-role='seed'] .nd__btn {
-  left: -40px;
-  top: -40px;
-  width: 80px;
-  height: 80px;
+  left: -56px;
+  top: -56px;
+  width: 112px;
+  height: 112px;
+  border-radius: 50%;
 }
 
 .nd__btn:focus-visible {
   box-shadow:
-    0 0 0 1px var(--c2),
-    0 0 28px var(--c);
+    0 0 0 1px color-mix(in srgb, var(--c2) 38%, transparent),
+    0 0 30px color-mix(in srgb, var(--c) 55%, transparent);
+}
+
+/* the seed is lit by its own light: keyboard focus is a soft bloom, never a hard ring */
+.nd[data-role='seed'] .nd__btn:focus-visible {
+  box-shadow: 0 0 46px color-mix(in srgb, var(--c) 40%, transparent);
 }
 
 .nd__lab {

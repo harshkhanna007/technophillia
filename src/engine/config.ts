@@ -32,8 +32,8 @@ export const LOOK = {
   background: 0x01020a,
   fov: 38,
   /** growth speed ≈ world units per second, used to derive timeline durations */
-  growMin: 1.7,
-  growMax: 3.0,
+  growMin: 2.3,
+  growMax: 4.0,
   pulseSpeed: 15,
 };
 

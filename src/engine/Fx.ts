@@ -46,7 +46,7 @@ export class NodeMarkers {
       iPos.set([node.pos.x, node.pos.y, node.pos.z], i * 3);
       iColA.set([node.palette.a.r, node.palette.a.g, node.palette.a.b], i * 3);
       iAccent.set([node.palette.accent.r, node.palette.accent.g, node.palette.accent.b], i * 3);
-      const size = node.depth === 1 ? 0.56 : node.depth === 2 ? 0.42 : 0.34;
+      const size = node.depth === 1 ? 0.72 : node.depth === 2 ? 0.52 : 0.42;
       iInfo.set([size, (i * 0.6180339) % 1, node.depth, 0], i * 4);
     });
     this.geo = new THREE.InstancedBufferGeometry();
@@ -99,10 +99,9 @@ export class Seed {
   constructor(shared: Shared, a: THREE.Color, b: THREE.Color, hot: THREE.Color, extent = 2.2 * SEED_SCALE) {
     this.u = {
       uTime: shared.uTime,
-      uDirs: { value: Array.from({ length: 8 }, () => new THREE.Vector2(1, 0)) },
-      uDirCount: { value: 0 },
       uScale: { value: SEED_SCALE },
       uAppear: { value: 0 },
+      uSprout: { value: 0 },
       uEnergy: { value: 0 },
       uFlare: { value: 0 },
       uHover: { value: 0 },
@@ -115,17 +114,6 @@ export class Seed {
     this.mesh = new THREE.Mesh(shared.quad, this.mat);
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = 4;
-  }
-
-  /** the sprouts of the seed point at the exact directions the primary branches leave in */
-  setDirs(positions: { x: number; y: number }[]) {
-    const dirs = this.u.uDirs.value as THREE.Vector2[];
-    const n = Math.min(8, positions.length);
-    for (let i = 0; i < n; i++) {
-      const l = Math.hypot(positions[i].x, positions[i].y) || 1;
-      dirs[i].set(positions[i].x / l, positions[i].y / l);
-    }
-    this.u.uDirCount.value = n;
   }
 
   dispose() {
@@ -343,7 +331,7 @@ export class ShockRings {
   private pool: { mesh: THREE.Mesh; u: Record<string, AnyUniform>; age: number; dur: number; live: boolean }[] = [];
   private mats: THREE.ShaderMaterial[] = [];
 
-  constructor(shared: Shared, size = 6) {
+  constructor(shared: Shared, size = 10) {
     for (let i = 0; i < size; i++) {
       const u = {
         uPos: { value: new THREE.Vector3() },

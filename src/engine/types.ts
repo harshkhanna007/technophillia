@@ -23,12 +23,13 @@ export interface NodeData {
 export interface CategoryData extends NodeData {
   style: StyleId;
   palette: Palette;
-  /** optional override of the angular position (degrees, 0 = right, 90 = up) */
-  angle?: number;
 }
 
 export interface ExperienceMeta {
   wordmark: string;
+  /** shown while the seed waits to be clicked */
+  seedHint: string;
+  /** shown once the tree has grown, before the first branch is opened */
   hint: string;
 }
 
@@ -50,10 +51,12 @@ export interface TreeNode {
   style: StyleId;
   palette: RuntimePalette;
   pos: { x: number; y: number; z: number };
-  angle: number; // radial angle used by the layout
+  angle: number; // outward heading (radians) used to shape the branch that reaches this node
   side: 'l' | 'r';
   leaves: number;
   /** distance to the closest sibling – used to keep procedural detail inside its own territory */
   clearance: number;
   number: string;
+  /** primaries only: where on the stem this branch leaves (position, outward heading, arc-length fraction) */
+  origin?: { x: number; y: number; hx: number; hy: number; t: number };
 }

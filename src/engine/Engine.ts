@@ -29,6 +29,10 @@ export interface EngineState {
   busy: boolean;
   muted: boolean;
   intro: boolean;
+  /** the seed is awake and waiting to be clicked */
+  ready: boolean;
+  /** the seed has been clicked: the tree is growing or grown */
+  started: boolean;
   current: { title: string; description: string } | null;
 }
 
@@ -63,6 +67,12 @@ interface World {
   markers: NodeMarkers;
   overlay: Overlay;
   group: THREE.Group;
+  /** the trunk every primary leaves from */
+  stem: BranchMesh;
+  /** decorative twigs that grow with the stem */
+  ornaments: { mesh: BranchMesh; t: number }[];
+  /** small twigs on each primary bough while it waits to be opened */
+  twigs: { rt: NodeRT; mesh: BranchMesh; fade: number; delay: number }[];
 }
 
 interface EnergyJob {
@@ -73,6 +83,9 @@ interface EnergyJob {
 }
 
 const SEED_LIGHT = new THREE.Color('#5fd0ff');
+const BLOOM_BASE = 1.7;
+/** the closer you zoom on a node, the wider the view must stay once more of the tree is open (see frameFor) */
+const ZOOM = { levelStep: 1.7, perOpen: 0.6, share: 0.55, cap: 0.8 };
 const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
 const growEase = (p: number) => 0.32 * p + 0.68 * (p * p * (3 - 2 * p));
 
@@ -129,6 +142,15 @@ export class Engine {
   private skipAcc = 0;
   private skipFlip = false;
   private coarse = false;
+  private stemFlare = 0;
+  private started = false;
+  private ready = false;
+  private lastInvite = 0;
+  private flashes: { x: number; y: number; c: THREE.Color; age: number; dur: number; power: number; r: number }[] = [];
+  private diving = false;
+  private drag: { id: number; x: number; y: number; sx: number; sy: number; moved: boolean } | null = null;
+  private touches = new Map<number, { x: number; y: number }>();
+  private pinchPrev = 0;
 
   constructor(host: HTMLElement, private categories: CategoryData[]) {
     this.host = host;
@@ -163,18 +185,19 @@ export class Engine {
 
     this.buildFx();
     this.world = this.buildWorld(this.layoutKind());
-    this.seed.setDirs(this.world.model.primaries.map((n) => n.pos));
     this.setupPost();
     this.bindEvents();
 
-    this.rig.snap(this.frameFor(null, 1.55));
-    this.rig.setTarget(this.frameFor(null), 0.42);
+    this.setCameraLimits();
+    this.rig.snap(this.seedFraming());
+    this.rig.setTarget(this.seedFraming(), 0.42);
     this.syncRoles();
     this.emit();
     this.lastTime = performance.now();
     gsap.ticker.add(this.tick);
     if (process.env.NODE_ENV !== 'production' && window.location.search.includes('pump')) {
       // dev-only: keep frames flowing when the tab is occluded (automated screenshots)
+      (window as unknown as { __gsap?: typeof gsap }).__gsap = gsap;
       const id = window.setInterval(() => gsap.ticker.tick(), 16);
       this.cleanups.push(() => window.clearInterval(id));
     }
@@ -195,6 +218,8 @@ export class Engine {
       busy: this.busy,
       muted: this.audio.muted,
       intro: this.introDone,
+      ready: this.ready,
+      started: this.started,
       current: cur ? { title: cur.title, description: cur.description } : null,
     };
   }
@@ -227,6 +252,7 @@ export class Engine {
 
   home() {
     this.audio.unlock();
+    if (!this.started) return this.begin();
     if (this.busy) this.finish();
     if (this.path.length === 0) {
       this.seedFlare();
@@ -290,12 +316,19 @@ export class Engine {
   }
 
   private buildWorld(kind: LayoutKind): World {
-    const sq = kind === 'portrait' ? { x: 0.62, y: 1.1 } : kind === 'square' ? { x: 0.86, y: 1 } : { x: 1, y: 1 };
-    const model = buildTree(this.categories, { ...DEFAULT_LAYOUT, squashX: sq.x, squashY: sq.y, ring: kind === 'portrait' ? 6.8 : 6.4 });
+    const sq = kind === 'portrait' ? { x: 0.5, y: 1.5 } : kind === 'square' ? { x: 0.86, y: 1.12 } : { x: 1, y: 1 };
+    const model = buildTree(this.categories, { ...DEFAULT_LAYOUT, squashX: sq.x, squashY: sq.y, ring: kind === 'portrait' ? 10.5 : DEFAULT_LAYOUT.ring, flare: kind === 'portrait' ? 0.3 : DEFAULT_LAYOUT.flare });
     const markers = new NodeMarkers(model.nodes, this.shared);
     this.scene.add(markers.mesh);
     const group = new THREE.Group();
     this.scene.add(group);
+    const stem = new BranchMesh(model.stemNode, { x: 0, y: 0 }, 0, { x: 0, y: 1 }, this.shared, model.stem);
+    group.add(stem.group);
+    const ornaments = model.ornaments.map((o) => {
+      const mesh = new BranchMesh(o.node, { x: o.origin.x, y: o.origin.y }, 0, { x: o.origin.hx, y: o.origin.hy }, this.shared);
+      group.add(mesh.group);
+      return { mesh, t: o.t };
+    });
     const overlay = new Overlay(this.host, model.nodes, {
       select: (id) => this.select(id),
       hover: (id) => this.setHover(id),
@@ -327,18 +360,23 @@ export class Engine {
     });
     overlay.setObstacleSource(() => {
       const out: Float32Array[] = [];
+      if (stem.group.visible) out.push(stem.obstacles);
+      for (const o of ornaments) if (o.mesh.group.visible) out.push(o.mesh.obstacles);
       for (const rt of list) {
         const b = rt.branch;
         if (b && b.group.visible) out.push(b.obstacles);
       }
       return out;
     });
-    return { kind, model, rts, list, markers, overlay, group };
+    return { kind, model, rts, list, markers, overlay, group, stem, ornaments, twigs: [] };
   }
 
   private destroyWorld() {
     const w = this.world;
     for (const rt of w.list) rt.branch?.dispose();
+    w.stem.dispose();
+    for (const o of w.ornaments) o.mesh.dispose();
+    for (const t of w.twigs) t.mesh.dispose();
     w.markers.dispose();
     this.scene.remove(w.markers.mesh);
     this.scene.remove(w.group);
@@ -357,7 +395,7 @@ export class Engine {
       });
       composer.addPass(new RenderPass(this.scene, this.rig.camera));
       const bloom = new BloomEffect({
-        intensity: 1.45,
+        intensity: BLOOM_BASE,
         luminanceThreshold: 0.34,
         luminanceSmoothing: 0.5,
         mipmapBlur: true,
@@ -391,6 +429,7 @@ export class Engine {
 
     const move = (e: PointerEvent) => {
       this.rig.pTarget.set((e.clientX / this.w) * 2 - 1, -((e.clientY / this.h) * 2 - 1));
+      this.dragView(e);
       const p = this.ptr;
       p.x = e.clientX;
       p.y = e.clientY;
@@ -419,12 +458,38 @@ export class Engine {
       this.lastInput = performance.now();
       this.audio.unlock();
       const el = e.target as Element | null;
+      const onUi = !!el?.closest?.('.nd__btn, .hud button');
       // empty space gets a ripple of light; nodes and HUD buttons already react on their own
-      if (!el?.closest?.('.nd__btn, .hud button')) this.tapRipple(e.clientX, e.clientY);
+      if (!onUi) {
+        this.tapRipple(e.clientX, e.clientY);
+        this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (this.touches.size === 1) this.drag = { id: e.pointerId, x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, moved: false };
+        else this.drag = null;
+        this.pinchPrev = 0;
+      }
     };
-    const up = () => {
+    const up = (e: PointerEvent) => {
       this.ptr.down = false;
+      this.touches.delete(e.pointerId);
+      if (this.drag?.id === e.pointerId) this.drag = null;
+      if (this.touches.size < 2) this.pinchPrev = 0;
     };
+    const wheel = (e: WheelEvent) => {
+      if ((e.target as Element | null)?.closest?.('.hud')) return;
+      e.preventDefault();
+      this.lastInput = performance.now();
+      const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
+      const dy = Math.max(-240, Math.min(240, e.deltaY * unit));
+      this.rig.camera.updateMatrixWorld();
+      this.toWorld(e.clientX, e.clientY);
+      this.rig.zoomAbout(Math.exp(dy * (e.ctrlKey ? 0.01 : 0.0016)), this.ptrWorld.x, this.ptrWorld.y);
+    };
+    const dbl = (e: MouseEvent) => {
+      if ((e.target as Element | null)?.closest?.('.nd__btn, .hud')) return;
+      this.dive();
+    };
+    window.addEventListener('wheel', wheel, { passive: false });
+    window.addEventListener('dblclick', dbl);
     const over = (e: PointerEvent) => {
       this.overUi = !!(e.target as Element | null)?.closest?.('button, a');
     };
@@ -445,6 +510,8 @@ export class Engine {
       window.removeEventListener('pointerover', over);
       document.documentElement.removeEventListener('pointerleave', leave);
       document.removeEventListener('visibilitychange', vis);
+      window.removeEventListener('wheel', wheel);
+      window.removeEventListener('dblclick', dbl);
     });
 
     const key = (e: KeyboardEvent) => {
@@ -456,6 +523,8 @@ export class Engine {
         this.home();
       } else if (e.key.toLowerCase() === 'm') {
         this.toggleMute();
+      } else if (e.key.toLowerCase() === 'f') {
+        this.dive();
       }
     };
     window.addEventListener('keydown', key);
@@ -489,7 +558,8 @@ export class Engine {
     if (kind !== this.world.kind) {
       this.rebuildWorld(kind);
     } else {
-      this.rig.setTarget(this.frameFor(this.path[this.path.length - 1] ?? null), 1.6);
+      this.setCameraLimits();
+      if (this.started) this.rig.setTarget(this.frameFor(this.path[this.path.length - 1] ?? null, 1, this.diving), 1.6);
     }
   }
 
@@ -503,13 +573,25 @@ export class Engine {
     this.gctx = gsap.context(() => {});
     this.destroyWorld();
     this.world = this.buildWorld(kind);
-    this.seed.setDirs(this.world.model.primaries.map((n) => n.pos));
     this.path = [];
     this.buds.clear();
     this.hoverId = null;
     this.rig.followTarget = 0;
-    this.rig.snap(this.frameFor(null));
-    this.refreshBuds(true);
+    this.diving = false;
+    this.setCameraLimits();
+    if (this.started) {
+      // the tree restarts fully germinated: the stem is already standing
+      this.seed.u.uAppear.value = 1;
+      this.seed.u.uSprout.value = 1;
+      this.world.stem.ensureDetail(this.profile.detail);
+      this.world.stem.progress = 1.2;
+      this.world.stem.u.uGrow.value = 0;
+      this.buildTwigs();
+      this.rig.snap(this.frameFor(null));
+      this.refreshBuds(true);
+    } else {
+      this.rig.snap(this.seedFraming());
+    }
     this.syncRoles();
     this.emit();
   }
@@ -532,28 +614,127 @@ export class Engine {
     this.listeners.forEach((l) => l(s));
   }
 
-  private frameFor(node: TreeNode | null, zoomOut = 1): Framing {
+  /** the close-up the story opens on: the seed and the shoot leaving it */
+  private seedFraming(close = true): Framing {
+    const phone = this.world.kind === 'portrait';
+    if (close) return { fx: 0, fy: 0.35, dist: phone ? 8.4 : 6.4 };
+    return { fx: 0, fy: 1.45, dist: phone ? 11 : 8.6 };
+  }
+
+  /** a touch device feels motion more: landings are softened there */
+  private get weight() {
+    return this.coarse ? 0.62 : 1;
+  }
+
+  /** the camera may roam the whole tree, never far beyond it */
+  private setCameraLimits() {
+    const { model } = this.world;
+    let x0 = Infinity;
+    let x1 = -Infinity;
+    let y0 = Infinity;
+    let y1 = -Infinity;
+    for (const n of model.nodes) {
+      x0 = Math.min(x0, n.pos.x);
+      x1 = Math.max(x1, n.pos.x);
+      y0 = Math.min(y0, n.pos.y);
+      y1 = Math.max(y1, n.pos.y);
+    }
+    this.rig.setBounds(x0 - 5, x1 + 5, y0 - 4, y1 + 5);
+    this.rig.minDist = 5.5;
+    this.rig.maxDist = this.frameFor(null).dist * 1.35;
+  }
+
+  /** one clean tapered line, grown from a point at an angle: the building block of every twig */
+  private makeTwig(id: string, A: { x: number; y: number; z: number }, a: number, len: number, curl: number, owner: TreeNode, depth: number): BranchMesh {
+    const end = a + curl * 0.5;
+    const node: TreeNode = {
+      id,
+      title: '',
+      description: '',
+      depth,
+      index: 0,
+      catIndex: owner.catIndex,
+      parent: null,
+      children: [],
+      style: 'network',
+      palette: { a: owner.palette.a.clone(), b: owner.palette.b.clone(), accent: owner.palette.accent.clone() },
+      pos: { x: A.x + Math.cos(end) * len, y: A.y + Math.sin(end) * len + 0.3 * len * 0.25, z: 0 },
+      angle: a + curl,
+      side: Math.cos(a) >= 0 ? 'r' : 'l',
+      leaves: 1,
+      clearance: 2.2,
+      number: '',
+    };
+    const mesh = new BranchMesh(node, { x: A.x, y: A.y }, A.z, { x: Math.cos(a), y: Math.sin(a) }, this.shared);
+    mesh.setVisible(false);
+    this.world.group.add(mesh.group);
+    return mesh;
+  }
+
+  /** every primary bough forks into twigs that fork again: a branching system, not a single wire */
+  private buildTwigs() {
+    const w = this.world;
+    if (w.twigs.length) return;
+    const low = this.quality === 'low';
+    w.model.primaries.forEach((p, pi) => {
+      const rt = w.rts.get(p.id)!;
+      const bough = this.branchFor(rt);
+      const specs = [
+        { t: 0.3, off: 0.95, len: 4.2, delay: 0.1 },
+        { t: 0.5, off: 0.7, len: 3.5, delay: 0.25 },
+        { t: 0.7, off: 0.5, len: 2.6, delay: 0.4 },
+      ];
+      specs.forEach((sp, k) => {
+        const f = bough.sample(sp.t);
+        const base = Math.atan2(f.ty, f.tx);
+        // fork off on whichever side climbs
+        const sign = Math.sin(base + 0.7) >= Math.sin(base - 0.7) ? 1 : -1;
+        const a = base + sign * sp.off;
+        const twig = this.makeTwig(`twig-${pi}-${k}`, f, a, sp.len, sign * 0.7, p, 5);
+        w.twigs.push({ rt, mesh: twig, fade: 0, delay: sp.delay });
+        if (low || k === 2) return;
+        // each of the first two forks once more
+        const g = twig.sample(0.58);
+        const tb = Math.atan2(g.ty, g.tx);
+        const s2 = Math.sin(tb + 0.8) >= Math.sin(tb - 0.8) ? 1 : -1;
+        const sub = this.makeTwig(`twig-${pi}-${k}s`, g, tb + s2 * 0.8, sp.len * 0.5, s2 * 0.6, p, 6);
+        w.twigs.push({ rt, mesh: sub, fade: 0, delay: sp.delay + 0.3 });
+      });
+    });
+  }
+
+  /** where a node's own branch starts: the fork on the stem for primaries, the parent otherwise */
+  private startOf(node: TreeNode): { x: number; y: number } {
+    if (node.depth === 1 && node.origin) return { x: node.origin.x, y: node.origin.y };
+    return node.parent ? { x: node.parent.pos.x, y: node.parent.pos.y } : { x: 0, y: 0 };
+  }
+
+  private frameFor(node: TreeNode | null, zoomOut = 1, dive = false): Framing {
     const pts: { x: number; y: number }[] = [];
     const { model } = this.world;
     let padX: number;
     let padY: number;
     let minDist: number;
+    const phone = this.world.kind === 'portrait';
     if (!node) {
       for (const n of model.primaries) pts.push(n.pos);
       pts.push({ x: 0, y: 0 });
-      padX = 3.0;
-      padY = 1.9;
+      pts.push(model.stemNode.pos);
+      // the whole silhouette: the twigs and the crown frame the picture too
+      for (const o of model.ornaments) pts.push(o.node.pos);
+      padX = 3.4;
+      padY = 2.6;
       minDist = 14;
     } else {
       pts.push(node.pos);
-      pts.push(node.parent && node.parent.depth > 0 ? node.parent.pos : { x: 0, y: 0 });
+      if (!phone) pts.push(this.startOf(node));
       for (const c of node.children) pts.push(c.pos);
       if (node.children.length === 0) {
         // leaf: leave breathing room beyond the node for its title
-        const l = Math.hypot(node.pos.x, node.pos.y) || 1;
-        pts.push({ x: node.pos.x + (node.pos.x / l) * 3.2, y: node.pos.y + (node.pos.y / l) * 3.2 });
+        const room = phone ? 1.6 : 3.2;
+        pts.push({ x: node.pos.x + (node.side === 'r' ? room : -room), y: node.pos.y });
       }
-      padX = node.depth === 1 ? 2.6 : 2.1;
+      padX = phone ? (node.depth === 1 ? 1.9 : 1.6) : node.depth === 1 ? 2.6 : 2.1;
       padY = node.depth === 1 ? 2.2 : 1.8;
       minDist = node.depth >= 3 ? 9 : 10.5;
     }
@@ -569,6 +750,7 @@ export class Engine {
     }
     const f = this.rig.fit(x0, x1, y0, y1, padX, padY);
     f.dist = Math.max(f.dist, minDist) * zoomOut;
+    if (node && !dive) f.dist = Math.max(f.dist, this.zoomFloor(node, padX, padY) * zoomOut);
     if (node && this.w > 700) {
       // leave room for the luminous title on the side it will appear
       const { hw } = this.rig.halfView(f.dist);
@@ -580,6 +762,39 @@ export class Engine {
     return f;
   }
 
+  /**
+   * The zoom budget. A node still frames tightly, as it always did, but the tightest allowed view
+   * widens with every level you go down and every extra branch you have open, and never drops below a
+   * share of the view that would hold everything open so far. The camera pans along the branch
+   * instead of diving, so the tree around you stays readable. Wheel / pinch / F override this.
+   */
+  private zoomFloor(node: TreeNode, padX: number, padY: number): number {
+    let x0 = node.pos.x;
+    let x1 = node.pos.x;
+    let y0 = node.pos.y;
+    let y1 = node.pos.y;
+    let open = 0;
+    const take = (n: TreeNode) => {
+      x0 = Math.min(x0, n.pos.x);
+      x1 = Math.max(x1, n.pos.x);
+      y0 = Math.min(y0, n.pos.y);
+      y1 = Math.max(y1, n.pos.y);
+    };
+    for (const rt of this.world.list) {
+      if (rt.grown && !rt.retracting && rt.node !== node) {
+        take(rt.node);
+        open++;
+      }
+    }
+    for (const c of node.children) take(c);
+    const depth = node.depth;
+    const levels = 10.5 + ZOOM.levelStep * (depth - 1) + ZOOM.perOpen * Math.max(0, open - (depth - 1));
+    const phone = this.world.kind === 'portrait';
+    const all = this.rig.fit(x0, x1, y0, y1, padX, padY).dist * (phone ? 0.4 : ZOOM.share);
+    const overview = this.frameFor(null).dist;
+    return Math.min(Math.max(levels, all), overview * (phone ? 0.62 : ZOOM.cap));
+  }
+
   private branchFor(rt: NodeRT): BranchMesh {
     if (rt.branch) return rt.branch;
     const node = rt.node;
@@ -588,9 +803,9 @@ export class Engine {
     let zA = 0;
     let heading: P;
     if (parent.depth === 0) {
-      const l = Math.hypot(node.pos.x, node.pos.y) || 1;
-      heading = { x: node.pos.x / l, y: node.pos.y / l };
-      A = { x: heading.x * 0.6 * SEED_SCALE, y: heading.y * 0.6 * SEED_SCALE };
+      const o = node.origin ?? { x: 0, y: 0.6 * SEED_SCALE, hx: Math.sign(node.pos.x) * 0.8, hy: 0.6, t: 0 };
+      heading = { x: o.hx, y: o.hy };
+      A = { x: o.x, y: o.y };
     } else {
       const pb = this.branchFor(this.world.rts.get(parent.id)!);
       heading = pb.trunk.endHeading;
@@ -720,6 +935,30 @@ export class Engine {
     });
   }
 
+  /** coloured light thrown onto the black: it blooms outward from a point and fades, like a reflection */
+  private flash(x: number, y: number, color: THREE.Color, power = 1, r = 9, dur = 1.9) {
+    if (this.flashes.length > 5) this.flashes.shift();
+    this.flashes.push({ x, y, c: color.clone(), age: 0, dur, power, r });
+  }
+
+  /** the whole picture swells with light for a moment */
+  private bloomSurge(amount: number) {
+    const bloom = this.bloom;
+    if (!bloom || this.reduced) return;
+    const o = { v: amount * this.weight };
+    this.g(() =>
+      gsap.to(o, {
+        v: 0,
+        duration: 1.5,
+        ease: 'power3.out',
+        overwrite: 'auto',
+        onUpdate: () => {
+          bloom.intensity = BLOOM_BASE + o.v;
+        },
+      }),
+    );
+  }
+
   private burstAt(node: TreeNode, n: number, speed = 3.2) {
     this.sparks.burst(node.pos.x, node.pos.y, node.pos.z, n, { speed, size: 6, life: 1.3, color: node.palette.a.clone().lerp(node.palette.accent, 0.3), hot: 0.4 });
   }
@@ -756,9 +995,52 @@ export class Engine {
     return tl;
   }
 
-  /** pulse an existing branch from the seed end to its tip */
-  private pulseChain(tl: gsap.core.Timeline, chain: TreeNode[], startAt: number): number {
+  private stemPulseDur(primary: TreeNode) {
+    const t = primary.origin?.t ?? 1;
+    return ((this.world.stem.length * t) / LOOK.pulseSpeed + 0.12) * this.speed();
+  }
+
+  /** energy climbs the stem from the seed to the fork a primary leaves from */
+  private stemPulse(tl: gsap.core.Timeline, primary: TreeNode, startAt: number): number {
+    const b = this.world.stem;
+    const t = primary.origin?.t ?? 1;
+    const d = this.stemPulseDur(primary);
+    tl.add(() => {
+      b.u.uPulseAmp.value = 1;
+      this.energy = { branch: b, mode: 'pulse', t: 0, color: primary.palette.accent };
+      this.seedFlare();
+    }, startAt);
+    tl.fromTo(
+      b.u.uPulse,
+      { value: -0.05 },
+      {
+        value: t + 0.04,
+        duration: d,
+        ease: 'power1.in',
+        onUpdate: () => {
+          if (this.energy && this.energy.branch === b) this.energy.t = b.u.uPulse.value as number;
+        },
+        onComplete: () => {
+          b.u.uPulseAmp.value = 0;
+          b.u.uPulse.value = -1;
+          this.stemFlare = 1;
+          const o = primary.origin;
+          if (o) {
+            this.rings.fire(o.x, o.y, 0, primary.palette.a, 3.0, 1.1);
+            this.flash(o.x, o.y, primary.palette.a, 0.8, 7, 1.4);
+          }
+          this.audio.tick();
+        },
+      },
+      startAt,
+    );
+    return startAt + d;
+  }
+
+  /** pulse the stem up to `via`'s fork, then every existing branch of the chain from its seed end to its tip */
+  private pulseChain(tl: gsap.core.Timeline, chain: TreeNode[], startAt: number, via?: TreeNode): number {
     let at = startAt;
+    if (via) at = this.stemPulse(tl, via, at);
     for (const a of chain) {
       const art = this.world.rts.get(a.id)!;
       const b = art.branch;
@@ -768,7 +1050,6 @@ export class Engine {
       tl.add(() => {
         b.u.uPulseAmp.value = 1;
         this.energy = { branch: b, mode: 'pulse', t: 0, color: a.palette.accent };
-        if (a.depth === 1) this.seedFlare();
       }, at);
       tl.fromTo(
         b.u.uPulse,
@@ -810,26 +1091,21 @@ export class Engine {
     rt.flare = 1.6;
     this.audio.select();
     this.haptic(12);
-    this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.a, 2.3, 1.1);
-    this.burstAt(node, 26, 2.4);
+    this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.a, 3.6, 1.3);
+    this.burstAt(node, 60, 3.6);
+    this.flash(node.pos.x, node.pos.y, node.palette.a, 0.9, 7, 1.6);
     this.g(() => gsap.to(branch, { ghostProgress: 0, duration: 0.35, ease: 'power2.in', overwrite: true }));
     branch.progress = 0;
     branch.u.uGrow.value = 1;
     branch.u.uDim.value = 1;
-    this.rig.setTarget(this.frameFor(node), 1.05 / sp);
+    this.resetView();
+    this.rig.setTarget(this.frameFor(node), 0.8 / sp);
     this.rig.followTarget = this.reduced ? 0 : 0.3;
 
     const tl = this.newTimeline();
-    let at = 0;
-    if (anc.length) {
-      const pulseTotal = anc.reduce((s, a) => s + ((this.world.rts.get(a.id)?.branch?.length ?? 0) / LOOK.pulseSpeed + 0.12) * sp, 0);
-      this.audio.pulse(pulseTotal);
-      at = this.pulseChain(tl, anc, 0.1);
-    } else {
-      this.seedFlare();
-      this.audio.pulse(0.6);
-      at = 0.35;
-    }
+    const pulseTotal = anc.reduce((s, a) => s + ((this.world.rts.get(a.id)?.branch?.length ?? 0) / LOOK.pulseSpeed + 0.12) * sp, this.stemPulseDur(chain[0]));
+    this.audio.pulse(pulseTotal);
+    const at = this.pulseChain(tl, anc, 0.1, chain[0]);
     let arrived = false;
     tl.add(() => {
       this.audio.grow(dur);
@@ -864,13 +1140,19 @@ export class Engine {
     this.path = ancestry(node);
     this.refreshBuds();
     this.world.overlay.revealTitle(node.id, this.speed() > 1 ? 1.4 : 1);
-    this.flareNode(node, 2.2);
-    this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.a, 3.4, 1.7);
-    this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.accent, 2.1, 1.1);
-    this.burstAt(node, 90, 4.2);
+    this.flareNode(node, 2.6);
+    this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.a, 7.2, 2.3);
+    this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.accent, 4.2, 1.5);
+    this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.b, 10.5, 3.0);
+    this.burstAt(node, 240, 6.4);
+    this.flash(node.pos.x, node.pos.y, node.palette.a, 1.5, 11, 2.4);
+    this.bloomSurge(1.3);
     this.audio.impact();
     this.haptic([10, 40, 18]);
-    if (!this.reduced) this.rig.impulse(-5.5);
+    if (!this.reduced) {
+      this.rig.impulse(-13 * this.weight);
+      this.rig.shake((node.index % 2 ? 1 : -1) * 0.035 * this.weight);
+    }
     this.rig.followTarget = 0;
     this.emit();
   }
@@ -878,8 +1160,10 @@ export class Engine {
   private ping(rt: NodeRT) {
     this.audio.select();
     this.flareNode(rt.node, 1.8);
-    this.rings.fire(rt.node.pos.x, rt.node.pos.y, rt.node.pos.z, rt.node.palette.a, 2.6, 1.3);
-    this.burstAt(rt.node, 40, 3);
+    this.rings.fire(rt.node.pos.x, rt.node.pos.y, rt.node.pos.z, rt.node.palette.a, 4.6, 1.6);
+    this.burstAt(rt.node, 80, 4.4);
+    this.flash(rt.node.pos.x, rt.node.pos.y, rt.node.palette.a, 0.9, 8, 1.6);
+    this.bloomSurge(0.5);
     this.world.overlay.revealTitle(rt.node.id, 1.6);
   }
 
@@ -888,10 +1172,11 @@ export class Engine {
     const chain = ancestry(node);
     this.audio.select();
     this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.a, 2.2, 1);
-    this.rig.setTarget(this.frameFor(node), 1.1 / this.speed());
+    this.resetView();
+    this.rig.setTarget(this.frameFor(node), 0.9 / this.speed());
     const tl = this.newTimeline();
     this.audio.pulse(0.9);
-    const end = this.pulseChain(tl, chain, 0.05);
+    const end = this.pulseChain(tl, chain, 0.05, chain[0]);
     tl.add(() => this.arrive(node, false), end - 0.1);
     tl.to({}, { duration: 0.2 }, end);
   }
@@ -921,7 +1206,8 @@ export class Engine {
     }
     this.path = isHome ? [] : ancestry(anchor);
     this.syncRoles();
-    this.rig.setTarget(this.frameFor(isHome ? null : anchor), 1.0 / this.speed());
+    this.resetView();
+    this.rig.setTarget(this.frameFor(isHome ? null : anchor), 0.85 / this.speed());
     this.rig.followTarget = 0;
 
     const tl = this.newTimeline();
@@ -978,20 +1264,125 @@ export class Engine {
   }
 
   /* ─────────────────────────── intro ─────────────────────────── */
+  /** the seed fades in out of the dark and waits, softly pulsing, to be clicked */
   private intro() {
     const sp = this.speed();
     this.g(() => {
       gsap.to(this.seed.u.uAppear, { value: 1, duration: 3.2 * sp, ease: 'power2.out' });
       gsap.fromTo(this.bg.u.uReveal, { value: 0 }, { value: 1, duration: 4, ease: 'power1.inOut' });
-      gsap.delayedCall(1.7 * sp, () => this.refreshBuds());
-      gsap.delayedCall(4.0 * sp, () => {
-        this.introDone = true;
+      gsap.delayedCall(2.4 * sp, () => {
+        this.ready = true;
         this.emit();
       });
     });
   }
 
+  /** the click: the seed cracks, a shoot climbs out, the stem rises to its crown, then the six buds open */
+  private begin() {
+    if (this.started || this.destroyed) return;
+    this.started = true;
+    this.ready = true;
+    const sp = this.speed();
+    const stem = this.world.stem;
+    stem.ensureDetail(this.profile.detail);
+    this.buildTwigs();
+    const climb = this.reduced ? 1.4 : 3.8;
+    const start = 1.7 * sp;
+    this.audio.select();
+    this.haptic([10, 40, 18]);
+    this.seedFlare();
+    this.rings.fire(0, 0, 0.1, SEED_LIGHT, 5.5, 1.8);
+    this.rings.fire(0, 0, 0.1, new THREE.Color('#9b8cff'), 9, 2.6);
+    this.sparks.burst(0, 0, 0.1, 160, { speed: 4.6, size: 7, life: 1.8, color: SEED_LIGHT, hot: 0.5 });
+    this.flash(0, 0, SEED_LIGHT, 1.8, 12, 2.8);
+    this.bloomSurge(1.6);
+    if (!this.reduced) this.rig.impulse(-9 * this.weight);
+    this.rig.setTarget(this.seedFraming(false), 0.7);
+    this.emit();
+    this.g(() => {
+      gsap.to(this.seed.u.uSprout, { value: 1, duration: 2.2 * sp, ease: 'power2.inOut' });
+      gsap.delayedCall(start, () => {
+        this.audio.grow(climb);
+        this.seedFlare();
+        this.stemFlare = 1;
+        this.energy = { branch: stem, mode: 'grow', t: 0, color: SEED_LIGHT };
+        this.flash(0, 1.2, SEED_LIGHT, 1.4, 9, 2.2);
+        this.activity = 1;
+        this.rig.followTarget = this.reduced ? 0 : 0.4;
+        this.rig.setTarget(this.frameFor(null), 0.5);
+        stem.progress = 0;
+        gsap.to(stem, {
+          progress: 1.2,
+          duration: climb * 1.16,
+          ease: growEase,
+          onUpdate: () => {
+            if (this.energy && this.energy.branch === stem) this.energy.t = stem.progress;
+          },
+          onComplete: () => {
+            if (this.energy && this.energy.branch === stem) this.energy = null;
+            this.rig.followTarget = 0;
+          },
+        });
+      });
+      gsap.delayedCall(start + climb * 0.78, () => this.refreshBuds());
+      gsap.delayedCall(start + climb * 1.16 + 0.6, () => {
+        this.introDone = true;
+        this.audio.impact();
+        const top = this.world.model.stemNode.pos;
+        this.rings.fire(top.x, top.y, 0, SEED_LIGHT, 8, 2.4);
+        this.flash(top.x, top.y, SEED_LIGHT, 1.3, 11, 2.4);
+        this.bloomSurge(1.1);
+        if (!this.reduced) {
+          this.rig.impulse(-8 * this.weight);
+          this.rig.shake(0.03 * this.weight);
+        }
+        this.emit();
+      });
+    });
+  }
+
+  /** back to the auto camera (and out of a manual dive) whenever the story moves to another level */
+  private resetView() {
+    this.rig.resetView();
+    this.diving = false;
+  }
+
+  /** F / double-click: dive in to the original tight close-up on the current branch, again to come back */
+  private dive() {
+    const cur = this.path[this.path.length - 1];
+    if (!cur) return;
+    this.rig.resetView();
+    this.diving = !this.diving;
+    this.rig.setTarget(this.frameFor(cur, 1, this.diving), 1.3);
+  }
+
   /* ─────────────────────────── pointer, cursor, touch ─────────────────────────── */
+  /** one pointer drags the view, two pinch it: free zoom + pan on top of the auto camera */
+  private dragView(e: PointerEvent) {
+    if (!this.touches.has(e.pointerId)) return;
+    this.touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (this.touches.size === 2) {
+      const [a, b] = [...this.touches.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (this.pinchPrev > 0 && d > 8) {
+        this.rig.camera.updateMatrixWorld();
+        this.toWorld((a.x + b.x) / 2, (a.y + b.y) / 2);
+        this.rig.zoomAbout(this.pinchPrev / d, this.ptrWorld.x, this.ptrWorld.y);
+      }
+      this.pinchPrev = d;
+      this.drag = null;
+      return;
+    }
+    const dr = this.drag;
+    if (!dr || dr.id !== e.pointerId) return;
+    if (!dr.moved && Math.hypot(e.clientX - dr.sx, e.clientY - dr.sy) < 7) return;
+    dr.moved = true;
+    const k = (this.rig.halfView(this.rig.tDist).hh * 2) / this.h;
+    this.rig.panBy(-(e.clientX - dr.x) * k, (e.clientY - dr.y) * k);
+    dr.x = e.clientX;
+    dr.y = e.clientY;
+  }
+
   private haptic(pattern: number | number[]) {
     if (this.coarse && !this.reduced && typeof navigator !== 'undefined' && 'vibrate' in navigator) {
       try {
@@ -1131,6 +1522,51 @@ export class Engine {
     }
     w.markers.commit();
 
+    // ── the stem: always standing once grown, lit by the energy that climbs it
+    const st = w.stem;
+    const stAlive = st.progress > 0.0005;
+    st.setVisible(stAlive);
+    if (stAlive) {
+      this.stemFlare *= fd;
+      st.u.uDim.value = (this.path.length ? 0.62 : 0.88) + this.stemFlare * 0.3;
+      st.u.uBoost.value = 1 + (this.seed.u.uHover.value as number) * 0.3 + this.stemFlare * 0.4;
+      st.u.uIdle.value = 1;
+      if (st.progress >= 1.19) st.u.uGrow.value += (0 - st.u.uGrow.value) * (1 - Math.exp(-dt * 3));
+    }
+
+    // ── ornamental boughs follow the stem's growth, drawn as clean tapered lines
+    for (const o of w.ornaments) {
+      const p = clamp((st.progress - o.t) / 0.18, 0, 1);
+      const m = o.mesh;
+      m.ghostProgress = p;
+      m.setVisible(p > 0.0005);
+      m.setGhostDim(0.95 + this.stemFlare * 0.4);
+      m.setGhostBoost(1.7);
+    }
+
+    for (let i = this.flashes.length - 1; i >= 0; i--) {
+      this.flashes[i].age += dt;
+      if (this.flashes[i].age > this.flashes[i].dur) this.flashes.splice(i, 1);
+    }
+
+    // twigs on each waiting bough: they grow outward with the bud and rest once the branch is opened
+    for (const tw of w.twigs) {
+      const rt = tw.rt;
+      const target = rt.visT > 0.5 && !rt.grown && !rt.pending && !rt.retracting ? 1 : 0;
+      tw.fade += (target - tw.fade) * (1 - Math.exp(-dt * (target ? 1.1 : 5)));
+      const g = clamp((tw.fade - tw.delay) / (1 - tw.delay), 0, 1);
+      tw.mesh.ghostProgress = g;
+      tw.mesh.setVisible(g > 0.0005);
+      tw.mesh.setGhostDim(0.9);
+      tw.mesh.setGhostBoost(1.4 + rt.hov * 1.0);
+    }
+
+    // while the seed waits, a soft ripple reminds you it is the way in
+    if (!this.started && this.ready && time - this.lastInvite > 5.2) {
+      this.lastInvite = time;
+      this.seedFlare();
+    }
+
     // ── energy orb + sparks
     const orb = this.orb;
     const job = this.energy;
@@ -1204,26 +1640,39 @@ export class Engine {
     // the last light slot always belongs to the cursor, everything else stays below it
     const cap = Math.min(8, this.profile.bgLights) - 1;
     let i = 0;
-    const seedE = 0.6 + (this.seed.u.uEnergy.value as number) * 0.8;
-    bg.setLight(i++, 0, 0, 3.2, seedE, SEED_LIGHT);
+    const seedE = 0.7 + (this.seed.u.uEnergy.value as number) * 1.1;
+    bg.setLight(i++, 0, 0, 4.2, seedE, SEED_LIGHT);
     const job = this.energy;
     if (job && (this.orb.u.uAmp.value as number) > 0.05 && i < cap) {
       const o = this.orb.u.uPos.value as THREE.Vector3;
-      bg.setLight(i++, o.x, o.y, 3.6, 1.8 * (this.orb.u.uAmp.value as number), job.color);
+      bg.setLight(i++, o.x, o.y, 7.5, 2.7 * (this.orb.u.uAmp.value as number), job.color);
+    }
+    for (const f of this.flashes) {
+      if (i >= cap) break;
+      const k = f.age / f.dur;
+      const rise = 1 - Math.pow(1 - Math.min(1, k * 2.2), 3);
+      bg.setLight(i++, f.x, f.y, f.r * (0.45 + 0.75 * rise), f.power * 3.4 * Math.pow(1 - k, 1.7), f.c);
     }
     const cur = this.path[this.path.length - 1];
-    if (cur && i < cap) bg.setLight(i++, cur.pos.x, cur.pos.y, 5.4, 1.0, cur.palette.a);
+    if (cur && i < cap) bg.setLight(i++, cur.pos.x, cur.pos.y, 8, 1.3, cur.palette.a);
     for (let k = this.path.length - 2; k >= 0 && i < cap; k--) {
       const n = this.path[k];
-      bg.setLight(i++, n.pos.x, n.pos.y, 3.8, 0.6, n.palette.a);
+      bg.setLight(i++, n.pos.x, n.pos.y, 6, 0.8, n.palette.a);
     }
     for (const rt of this.world.list) {
       if (i >= cap) break;
-      if (rt.role === 'dormant') bg.setLight(i++, rt.node.pos.x, rt.node.pos.y, 3.2, 0.3, rt.node.palette.a);
+      if (rt.role === 'dormant') bg.setLight(i++, rt.node.pos.x, rt.node.pos.y, 5, 0.5, rt.node.palette.a);
+    }
+    // buds on the tree throw a faint tint of their own colour onto the dark
+    if (!this.path.length) {
+      for (const rt of this.world.list) {
+        if (i >= cap) break;
+        if (rt.role === 'rootbud') bg.setLight(i++, rt.node.pos.x, rt.node.pos.y, 3.4, 0.3 * rt.vis, rt.node.palette.a);
+      }
     }
     while (i < cap) bg.setLight(i++, 0, 0, 1, 0);
     // the pointer is a small lamp: it reveals the circuitry under it
-    bg.setLight(cap, this.ptrWorld.x, this.ptrWorld.y, 1.9, this.cursorLight, this.pointerColor());
+    bg.setLight(cap, this.ptrWorld.x, this.ptrWorld.y, 2.4, this.cursorLight, this.pointerColor());
   }
 
   /** adaptive resolution: if we cannot hold ~45fps for a while, trade pixels for smoothness */
