@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "build-game-audio-feedback": {
+      "source": "mengto/skills",
+      "sourceType": "github",
+      "skillPath": "agent-skills/game-development/build-game-audio-feedback/SKILL.md",
+      "computedHash": "9ddde7d35c5684b029c705e6ba4ba7b854e68632b5cf9245e5b7cf79c04a5f32"
+    },
     "gsap-core": {
       "source": "greensock/gsap-skills",
       "sourceType": "github",
@@ -30,6 +36,12 @@
       "sourceType": "github",
       "skillPath": "skills/review-animations/SKILL.md",
       "computedHash": "8c2befeb28bb484bf2de7b2fc228774857e266d32a65d76895e78651a536d8cf"
+    },
+    "shader-dev": {
+      "source": "minimax-ai/skills",
+      "sourceType": "github",
+      "skillPath": "skills/shader-dev/SKILL.md",
+      "computedHash": "eb5ec98f90eec2c202ebce61f40806b1af01823bde403fb453dfaac693dd83d0"
     },
     "three-best-practices": {
       "source": "emalorenzo/three-agent-skills",

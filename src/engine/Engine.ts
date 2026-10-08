@@ -14,6 +14,7 @@ import { CameraRig } from './CameraRig';
 import { Occupancy } from './clearance';
 import { Foliage } from './Foliage';
 import type { FoliageSource } from './Foliage';
+import { Moments } from './Moments';
 import { Rng } from './rng';
 import { Cursor } from './Cursor';
 import type { CursorTarget, PointerState } from './Cursor';
@@ -123,6 +124,7 @@ export class Engine {
   private seed!: Seed;
   private orb!: EnergyOrb;
   private rings!: ShockRings;
+  private moments!: Moments;
   private world!: World;
 
   private path: TreeNode[] = [];
@@ -299,6 +301,7 @@ export class Engine {
     this.seed.dispose();
     this.orb.dispose();
     this.rings.dispose();
+    this.moments.dispose();
     this.shared.quad.dispose();
     this.composer?.dispose();
     this.renderer.dispose();
@@ -322,6 +325,8 @@ export class Engine {
     this.scene.add(this.orb.mesh);
     this.rings = new ShockRings(this.shared);
     this.scene.add(this.rings.group);
+    this.moments = new Moments(this.shared);
+    this.scene.add(this.moments.group);
   }
 
   private layoutKind(): LayoutKind {
@@ -1028,7 +1033,7 @@ export class Engine {
     if (rt) {
       rt.hovT = 1;
       if (rt.role === 'bud' || rt.role === 'rootbud' || rt.role === 'farbud') {
-        this.audio.hover();
+        this.audio.hover(rt.node.style, rt.node.index);
         rt.branch?.setGhostBoost(2.6);
       } else if (rt.role !== 'hidden') this.audio.tick();
     }
@@ -1255,6 +1260,9 @@ export class Engine {
     this.flash(node.pos.x, node.pos.y, node.palette.a, 1.5, 11, 2.4);
     this.bloomSurge(1.3);
     this.audio.impact();
+    this.moments.fire(node, grown ? 1 : 0.6, this.reduced);
+    this.audio.signature(node.style, node.depth, node.index, grown);
+    this.syncHarmony();
     this.haptic([10, 40, 18]);
     if (!this.reduced) {
       this.rig.impulse(-13 * this.weight);
@@ -1262,6 +1270,14 @@ export class Engine {
     }
     this.rig.followTarget = 0;
     this.emit();
+  }
+
+  /** the chord follows the branch you are in and grows with every node left open */
+  private syncHarmony() {
+    const deepest = this.path[this.path.length - 1];
+    let open = 0;
+    for (const rt of this.world.list) if (rt.grown && !rt.retracting) open++;
+    this.audio.setHarmony(deepest ? deepest.style : null, open);
   }
 
   private ping(rt: NodeRT) {
@@ -1313,6 +1329,7 @@ export class Engine {
     }
     this.path = isHome ? [] : ancestry(anchor);
     this.syncRoles();
+    this.syncHarmony();
     this.resetView();
     this.rig.setTarget(this.frameFor(isHome ? null : anchor), 0.85 / this.speed());
     this.rig.followTarget = 0;
@@ -1715,6 +1732,7 @@ export class Engine {
     orb.mesh.visible = (orb.u.uAmp.value as number) > 0.01;
     this.sparks.flush();
     this.rings.update(dt);
+    this.moments.update(dt);
 
     // ── ambient
     this.activity += ((this.busy ? 1 : 0) - this.activity) * (1 - Math.exp(-dt * (this.busy ? 3 : 1.2)));
