@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import {
   BG_FRAG,
   BG_VERT,
+  LEAF_FRAG,
+  LEAF_VERT,
   MARKER_FRAG,
   MARKER_VERT,
   ORB_FRAG,
@@ -73,6 +75,115 @@ export class NodeMarkers {
 
   set(i: number, vis: number, act: number, hov: number, flare: number) {
     const o = i * 4;
+    this.state[o] = vis;
+    this.state[o + 1] = act;
+    this.state[o + 2] = hov;
+    this.state[o + 3] = flare;
+  }
+
+  commit() {
+    this.attr.needsUpdate = true;
+  }
+
+  dispose() {
+    this.geo.dispose();
+    this.mat.dispose();
+  }
+}
+
+/* ───────────────────────── node leaves ───────────────────────── */
+/** nodes this deep (or deeper) wear a sprig; the trunk and the primary boughs keep their clean look */
+const LEAF_MIN_DEPTH = 2;
+/** per leaf: [angle off the node's heading, length, half width, curl] and [stalk length, unfurl delay] (world units) */
+const LEAF_SPEC_A = [
+  [1.0, 0.54, 0.23, -0.2],
+  [-0.92, 0.48, 0.22, 0.18],
+  [0.16, 0.3, 0.2, -0.08],
+];
+const LEAF_SPEC_B = [
+  [0.15, 0],
+  [0.15, 0.14],
+  [0.13, 0.28],
+];
+
+/** A sprig of glass leaves on every node, tinted with the node's own palette and driven by the same state as its marker. */
+export class NodeLeaves {
+  readonly mesh: THREE.Mesh;
+  private state: Float32Array;
+  private attr: THREE.InstancedBufferAttribute;
+  private geo: THREE.InstancedBufferGeometry;
+  private mat: THREE.ShaderMaterial;
+  /** node index → instance slot (-1 = this node has no leaves) */
+  private slotOf: Int32Array;
+
+  constructor(nodes: TreeNode[], shared: Shared, opts: { leaves: number; sway: boolean }) {
+    const K = Math.min(opts.leaves, LEAF_SPEC_A.length);
+    this.slotOf = new Int32Array(nodes.length).fill(-1);
+    let n = 0;
+    nodes.forEach((node, i) => {
+      if (node.depth >= LEAF_MIN_DEPTH) this.slotOf[i] = n++;
+    });
+    const iPos = new Float32Array(n * 3);
+    const iColA = new Float32Array(n * 3);
+    const iAccent = new Float32Array(n * 3);
+    const iInfo = new Float32Array(n * 4);
+    this.state = new Float32Array(n * 4);
+    nodes.forEach((node, i) => {
+      const s = this.slotOf[i];
+      if (s < 0) return;
+      iPos.set([node.pos.x, node.pos.y, node.pos.z], s * 3);
+      iColA.set([node.palette.a.r, node.palette.a.g, node.palette.a.b], s * 3);
+      iAccent.set([node.palette.accent.r, node.palette.accent.g, node.palette.accent.b], s * 3);
+      // sprigs scale with the marker they grow from (depth 2 is the reference size)
+      const size = node.depth === 2 ? 0.52 : 0.42;
+      iInfo.set([node.angle, size / 0.52, (i * 0.6180339) % 1, 0], s * 4);
+    });
+
+    // one quad per leaf, tagged with its index
+    const pos = new Float32Array(K * 12);
+    const leaf = new Float32Array(K * 4);
+    const idx = new Uint16Array(K * 6);
+    const corner = [-1, -1, 1, -1, 1, 1, -1, 1];
+    for (let k = 0; k < K; k++) {
+      for (let c = 0; c < 4; c++) {
+        pos[(k * 4 + c) * 3] = corner[c * 2];
+        pos[(k * 4 + c) * 3 + 1] = corner[c * 2 + 1];
+        leaf[k * 4 + c] = k;
+      }
+      idx.set([k * 4, k * 4 + 1, k * 4 + 2, k * 4, k * 4 + 2, k * 4 + 3], k * 6);
+    }
+    this.geo = new THREE.InstancedBufferGeometry();
+    this.geo.setIndex(new THREE.BufferAttribute(idx, 1));
+    this.geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    this.geo.setAttribute('aLeaf', new THREE.BufferAttribute(leaf, 1));
+    this.geo.setAttribute('iPos', new THREE.InstancedBufferAttribute(iPos, 3));
+    this.geo.setAttribute('iColA', new THREE.InstancedBufferAttribute(iColA, 3));
+    this.geo.setAttribute('iAccent', new THREE.InstancedBufferAttribute(iAccent, 3));
+    this.geo.setAttribute('iInfo', new THREE.InstancedBufferAttribute(iInfo, 4));
+    this.attr = new THREE.InstancedBufferAttribute(this.state, 4);
+    this.attr.setUsage(THREE.DynamicDrawUsage);
+    this.geo.setAttribute('iState', this.attr);
+    this.geo.instanceCount = n;
+    this.mat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: shared.uTime,
+        uSway: { value: opts.sway ? 1 : 0 },
+        uSpecA: { value: LEAF_SPEC_A.map((a) => new THREE.Vector4(...(a as [number, number, number, number]))) },
+        uSpecB: { value: LEAF_SPEC_B.map((b) => new THREE.Vector4(b[0], b[1], 0, 0)) },
+      },
+      vertexShader: LEAF_VERT,
+      fragmentShader: LEAF_FRAG,
+      ...additive,
+    });
+    this.mesh = new THREE.Mesh(this.geo, this.mat);
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = 5;
+  }
+
+  set(i: number, vis: number, act: number, hov: number, flare: number) {
+    const s = this.slotOf[i];
+    if (s < 0) return;
+    const o = s * 4;
     this.state[o] = vis;
     this.state[o + 1] = act;
     this.state[o + 2] = hov;

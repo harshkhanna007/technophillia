@@ -275,6 +275,184 @@ void main(){
 }
 `;
 
+/* ───────────────────────── leaves: glass leaves that unfurl on the nodes and along the twigs ───────────────────────── */
+/* Every leaf is one quad. In leaf space u runs base→tip (0..1 leaf lengths) and v runs across; the quad also covers the short
+   stalk back to wherever the leaf is anchored. The fragment shader is shared: node sprigs and twig foliage differ only in how
+   their vertex shader decides where a leaf stands. */
+const LEAF_VARYINGS = /* glsl */ `
+varying vec2 vP;
+varying vec4 vShape; // length (world), half width, curl, stalk (in leaf lengths)
+varying vec4 vState; // vis, act, hover, flare
+varying vec3 vColA;
+varying vec3 vAccent;
+varying float vSeed;
+`;
+
+const LEAF_PLACE = /* glsl */ `
+vec2 leafPlace(vec2 corner, vec2 anchor, float ang, float len, float stem) {
+  vec2 dir = vec2(cos(ang), sin(ang));
+  vec2 nrm = vec2(-dir.y, dir.x);
+  vec2 c = corner * 0.5 + 0.5;
+  float u = mix(-stem / len - 0.06, 1.2, c.x);
+  float v = (c.y - 0.5) * 1.6;
+  vP = vec2(u, v);
+  return anchor + dir * (stem + u * len) + nrm * (v * len);
+}
+`;
+
+/* a sprig on a node: one instance per node, one quad per leaf (aLeaf), everything else derived from the spec + the node's seed */
+export const LEAF_VERT = /* glsl */ `
+attribute vec3 iPos;
+attribute vec3 iColA;
+attribute vec3 iAccent;
+attribute vec4 iInfo;  // heading, scale, seed, -
+attribute vec4 iState; // vis, act, hover, flare
+attribute float aLeaf;
+uniform float uTime;
+uniform float uSway;
+uniform vec4 uSpecA[3]; // angle off the heading, length, half width, curl
+uniform vec4 uSpecB[3]; // stalk length, unfurl delay
+${LEAF_VARYINGS}
+${GLSL_COMMON}
+${LEAF_PLACE}
+void main(){
+  int k = int(aLeaf + 0.5);
+  vec4 A = uSpecA[k];
+  vec4 B = uSpecB[k];
+  float vis = iState.x;
+  float act = iState.y;
+  float hov = iState.z;
+  float seed = fract(iInfo.z + float(k) * 0.3819);
+  float j1 = hash11(iInfo.z * 97.0 + float(k) * 13.0);
+  float j2 = hash11(iInfo.z * 41.0 + float(k) * 29.0 + 5.0);
+  // the smallest leaf takes whichever side the node's seed gives it
+  float flip = k == 2 ? (j2 > 0.5 ? 1.0 : -1.0) : 1.0;
+
+  // unfurl: staggered, quick ease-out with a hair of overshoot
+  float open = smoothstep(B.y, B.y + 0.6, vis);
+  float grow = (1.0 - pow(1.0 - open, 3.0)) * (1.0 + 0.08 * sin(open * 3.14159));
+  float sc = iInfo.y * (1.0 + 0.14 * act + 0.07 * hov);
+  float len = max(A.y * sc * (0.86 + 0.28 * j1) * grow, 0.0005);
+  float hw = A.z * (0.9 + 0.2 * j2);
+  float curl = A.w * flip * (0.8 + 0.4 * j1);
+
+  // leaves start folded along the heading and fan open; hovering opens them a little wider
+  float fan = A.x * flip * (0.3 + 0.7 * open) * (1.0 + 0.12 * hov + 0.06 * act) * (0.94 + 0.12 * j2);
+  float sway = uSway * sin(uTime * 0.8 + seed * 6.2831) * (0.045 + 0.03 * hov);
+  float ang = iInfo.x + fan + sway;
+  float stem = B.x * sc * (0.55 + 0.45 * grow);
+
+  vec2 wp = leafPlace(position.xy, iPos.xy, ang, len, stem);
+  vShape = vec4(len, hw, curl, stem / len);
+  vState = iState;
+  vColA = iColA;
+  vAccent = iAccent;
+  vSeed = seed;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(wp, iPos.z, 1.0);
+  if (vis < 0.003) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+}
+`;
+
+/* foliage on the twigs: one instance per leaf. A leaf unfurls as its twig's growth front passes, then rides a breeze that ripples across the canopy */
+export const FOLIAGE_VERT = /* glsl */ `
+attribute vec3 iPos;
+attribute vec3 iColA;
+attribute vec3 iAccent;
+attribute vec4 iLeaf;  // fan off the twig's tangent, length, half width, curl
+attribute vec4 iMeta;  // appear (fraction along the twig), seed, tangent angle, stalk
+attribute vec4 iState; // twig progress, glow
+uniform float uTime;
+uniform float uSway;
+${LEAF_VARYINGS}
+${LEAF_PLACE}
+void main(){
+  float prog = iState.x;
+  float glow = iState.y;
+  float open = smoothstep(iMeta.x, iMeta.x + 0.14, prog);
+  float grow = (1.0 - pow(1.0 - open, 3.0)) * (1.0 + 0.1 * sin(open * 3.14159));
+  float len = max(iLeaf.y * grow * (1.0 + 0.1 * glow), 0.0005);
+  float fan = iLeaf.x * (0.28 + 0.72 * open) * (1.0 + 0.1 * glow);
+  float breeze = uSway * (sin(uTime * 1.05 - iPos.x * 0.42 - iPos.y * 0.26 + iMeta.y * 6.2831) * 0.075 + sin(uTime * 2.3 + iMeta.y * 17.0) * 0.02);
+  float ang = iMeta.z + fan + breeze;
+  float stem = iMeta.w * (0.5 + 0.5 * grow);
+
+  vec2 wp = leafPlace(position.xy, iPos.xy, ang, len, stem);
+  vShape = vec4(len, iLeaf.z, iLeaf.w, stem / len);
+  vState = vec4(open * 0.85, 0.0, glow, 0.0);
+  vColA = iColA;
+  vAccent = iAccent;
+  vSeed = iMeta.y;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(wp, iPos.z, 1.0);
+  if (open < 0.003) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+}
+`;
+
+export const LEAF_FRAG = /* glsl */ `
+uniform float uTime;
+${LEAF_VARYINGS}
+void main(){
+  float u = vP.x;
+  float v = vP.y;
+  float len = vShape.x;
+  float hw = vShape.y;
+  float curl = vShape.z;
+  float stemU = vShape.w;
+  float vis = vState.x;
+  float act = vState.y;
+  float hov = vState.z;
+  float flare = min(vState.w, 1.3);
+
+  // outline: an exact lens drawn out to a point at the tip, widest a little nearer the base; the midline arcs gently
+  float uc = clamp(u, 0.0, 1.0);
+  float qy = v - curl * uc * uc;
+  float tw = u > 0.0 ? pow(u, 0.82) : u;
+  float vr = 0.5 * (hw + 0.25 / hw);
+  float vd = 0.5 * (0.25 / hw - hw);
+  vec2 q = abs(vec2(qy, tw - 0.5));
+  float dv = ((q.y - 0.5) * vd > q.x * 0.5) ? length(q - vec2(0.0, 0.5)) : length(q - vec2(-vd, 0.0)) - vr;
+  float dw = dv * len; // distance to the rim, in world units
+  float tc = pow(max(uc, 0.003), 0.82) - 0.5;
+  float h = max(sqrt(max(vr * vr - tc * tc, 0.0)) - vd, 0.0);
+
+  // line weights follow the screen: never thinner than a pixel, and fine detail fades out as the leaf shrinks
+  float px = max(fwidth(dw), 1e-4);
+  float sizePx = len / px;
+  float inside = 1.0 - smoothstep(-px, px, dw);
+  float hl = max(h * len, 1e-4);
+  float across = abs(qy) * len;
+
+  float edge = exp(-pow(dw / max(0.0072, px * 0.75), 2.0));
+  float halo = exp(-pow(dw / max(0.032, px * 2.2), 2.0)) * 0.16;
+  // a glassy body: lit along the midrib, thinning to the rim and toward the tip
+  float depthIn = clamp(-dw / hl, 0.0, 1.0);
+  float fill = inside * (0.045 + 0.13 * pow(depthIn, 1.5)) * (1.0 - 0.45 * uc);
+  float rib = exp(-pow(across / max(0.0048, px * 0.7), 2.0)) * inside * smoothstep(0.0, 0.06, uc) * (1.0 - smoothstep(0.55, 0.96, uc)) * smoothstep(7.0, 16.0, sizePx);
+  float stalk = exp(-pow(abs(v) * len / max(0.0052, px * 0.7), 2.0)) * (1.0 - smoothstep(0.0, 0.03, u)) * smoothstep(-stemU, -stemU * 0.55, u);
+
+  // side veins sweep from the rib toward the tip
+  float fx = fract((uc - abs(qy) * 1.35) * 5.0);
+  float dl = min(fx, 1.0 - fx) / 5.0 * 0.8 * len;
+  float vein = exp(-pow(dl / max(0.0032, px * 0.7), 2.0)) * inside * smoothstep(0.12, 0.3, uc) * (1.0 - smoothstep(0.55, 0.92, uc)) * (1.0 - smoothstep(h * 0.55, h * 0.9, abs(qy))) * smoothstep(34.0, 70.0, sizePx);
+
+  // a slow swell of light travels the midrib to the tip, then the tip glints
+  float pu = fract(uTime * 0.14 + vSeed) * 1.5 - 0.25;
+  float pulse = exp(-pow((uc - pu) / 0.11, 2.0)) * inside * exp(-pow(across / max(hl * 0.9, 1e-3), 2.0)) * smoothstep(8.0, 20.0, sizePx);
+  vec2 pt = vec2(u - 1.0, qy) * len;
+  float tipD = dot(pt, pt);
+  float spark = exp(-tipD / max(0.00035, px * px * 2.5)) * (0.55 + 0.45 * sin(uTime * 1.9 + vSeed * 40.0));
+  float tipGlow = exp(-tipD / max(0.004, px * px * 14.0)) * 0.35;
+
+  vec3 hot = mix(vAccent, vec3(1.0), 0.72);
+  vec3 warm = mix(vColA, hot, 0.5);
+  vec3 col = vColA * (edge * 0.8 + halo + fill + vein * 0.42);
+  col += warm * (rib * 0.7 + stalk * 0.55 + tipGlow);
+  col += hot * (pulse * 0.4 + spark * 0.85);
+  col *= vis * (0.75 + 0.3 * act + 0.5 * hov) + flare * 0.45;
+  gl_FragColor = vec4(col, 1.0);
+  #include <colorspace_fragment>
+}
+`;
+
 /* ───────────────────────── seed: an almond of light, cracking open into a shoot and roots ───────────────────────── */
 export const SEED_VERT = /* glsl */ `
 varying vec2 vP;

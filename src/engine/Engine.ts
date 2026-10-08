@@ -11,17 +11,22 @@ import { BranchMesh } from './BranchMesh';
 import type { AnyUniform, Shared } from './BranchMesh';
 import { AudioEngine } from './AudioEngine';
 import { CameraRig } from './CameraRig';
+import { Occupancy } from './clearance';
+import { Foliage } from './Foliage';
+import type { FoliageSource } from './Foliage';
+import { Rng } from './rng';
 import { Cursor } from './Cursor';
 import type { CursorTarget, PointerState } from './Cursor';
 import type { Framing } from './CameraRig';
 import { detectQuality, LOOK, PROFILES, SEED_SCALE } from './config';
 import type { Quality, QualityProfile } from './config';
-import { AmbientParticles, Background, EnergyOrb, NodeMarkers, Seed, ShockRings, Sparks } from './Fx';
+import { AmbientParticles, Background, EnergyOrb, NodeLeaves, NodeMarkers, Seed, ShockRings, Sparks } from './Fx';
 import { ancestry, buildTree, DEFAULT_LAYOUT, isDescendant } from './layout';
 import type { TreeModel } from './layout';
 import { Overlay } from './Overlay';
 import type { NodeRole } from './Overlay';
-import type { P } from './trunk';
+import { generateTrunk } from './trunk';
+import type { P, Trunk } from './trunk';
 import type { CategoryData, TreeNode } from './types';
 
 export interface EngineState {
@@ -65,15 +70,24 @@ interface World {
   rts: Map<string, NodeRT>;
   list: NodeRT[];
   markers: NodeMarkers;
+  leaves: NodeLeaves;
   overlay: Overlay;
   group: THREE.Group;
   /** the trunk every primary leaves from */
   stem: BranchMesh;
-  /** decorative twigs that grow with the stem */
-  ornaments: { mesh: BranchMesh; t: number }[];
+  /** decorative twigs that grow with the stem (`leaf` = their group in the foliage) */
+  ornaments: { mesh: BranchMesh; t: number; leaf: number }[];
   /** small twigs on each primary bough while it waits to be opened */
-  twigs: { rt: NodeRT; mesh: BranchMesh; fade: number; delay: number }[];
+  twigs: { rt: NodeRT; mesh: BranchMesh; fade: number; delay: number; leaf: number }[];
+  /** every strand that stands in the open: new twigs and leaves steer clear of it */
+  occ: Occupancy;
+  /** leaves on the twigs and ornaments; built together with the twigs */
+  foliage: Foliage | null;
 }
+
+/** how close two strands may come, and how much of a twig next to its parent is exempt from that rule */
+const GAP = 0.38;
+const FREE = 1.1;
 
 interface EnergyJob {
   branch: BranchMesh;
@@ -320,15 +334,30 @@ export class Engine {
     const model = buildTree(this.categories, { ...DEFAULT_LAYOUT, squashX: sq.x, squashY: sq.y, ring: kind === 'portrait' ? 10.5 : DEFAULT_LAYOUT.ring, flare: kind === 'portrait' ? 0.3 : DEFAULT_LAYOUT.flare });
     const markers = new NodeMarkers(model.nodes, this.shared);
     this.scene.add(markers.mesh);
+    const leaves = new NodeLeaves(model.nodes, this.shared, { leaves: this.quality === 'low' ? 2 : 3, sway: !this.reduced });
+    this.scene.add(leaves.mesh);
     const group = new THREE.Group();
     this.scene.add(group);
     const stem = new BranchMesh(model.stemNode, { x: 0, y: 0 }, 0, { x: 0, y: 1 }, this.shared, model.stem);
     group.add(stem.group);
-    const ornaments = model.ornaments.map((o) => {
-      const mesh = new BranchMesh(o.node, { x: o.origin.x, y: o.origin.y }, 0, { x: o.origin.hx, y: o.origin.hy }, this.shared);
+    // everything that already stands: the stem and every bough. Ornaments and twigs are fitted around it.
+    const occ = new Occupancy(0.4);
+    occ.add('stem', model.stem.pts);
+    for (const p of model.primaries) {
+      const o = p.origin!;
+      occ.add(p.id, generateTrunk(p, { x: o.x, y: o.y }, 0, { x: o.hx, y: o.hy }, new Rng(p.id + ':trunk')).pts);
+    }
+    const ornaments: World['ornaments'] = [];
+    const kept: TreeModel['ornaments'] = [];
+    for (const o of model.ornaments) {
+      const trunk = this.settleOrnament(o, occ);
+      if (!trunk) continue;
+      const mesh = new BranchMesh(o.node, { x: o.origin.x, y: o.origin.y }, 0, { x: o.origin.hx, y: o.origin.hy }, this.shared, trunk);
       group.add(mesh.group);
-      return { mesh, t: o.t };
-    });
+      ornaments.push({ mesh, t: o.t, leaf: -1 });
+      kept.push(o);
+    }
+    model.ornaments = kept;
     const overlay = new Overlay(this.host, model.nodes, {
       select: (id) => this.select(id),
       hover: (id) => this.setHover(id),
@@ -368,7 +397,38 @@ export class Engine {
       }
       return out;
     });
-    return { kind, model, rts, list, markers, overlay, group, stem, ornaments, twigs: [] };
+    return { kind, model, rts, list, markers, leaves, overlay, group, stem, ornaments, twigs: [], occ, foliage: null };
+  }
+
+  /**
+   * An ornament keeps the place the layout gave it unless that would cross something standing. Then it tries a
+   * small nudge, a shorter reach, and finally the other side of the stem; if nothing is clear it is left out.
+   */
+  private settleOrnament(o: TreeModel['ornaments'][number], occ: Occupancy): Trunk | null {
+    const { node, origin } = o;
+    const A = { x: origin.x, y: origin.y };
+    const reach = { x: node.pos.x - A.x, y: node.pos.y - A.y };
+    const angle = node.angle;
+    for (const mirror of [1, -1]) {
+      node.angle = mirror === 1 ? angle : Math.PI - angle;
+      const heading = { x: origin.hx * mirror, y: origin.hy };
+      for (const k of [1, 0.88, 0.76, 0.64, 0.52, 0.42]) {
+        for (const rot of [0, 0.12, -0.12, 0.24, -0.24]) {
+          const c = Math.cos(rot);
+          const s = Math.sin(rot);
+          const rx = reach.x * mirror;
+          node.pos = { x: A.x + (rx * c - reach.y * s) * k, y: A.y + (rx * s + reach.y * c) * k, z: 0 };
+          const trunk = generateTrunk(node, A, 0, heading, new Rng(node.id + ':trunk'));
+          if (occ.clashes(trunk.pts, node.id, GAP, A, FREE)) continue;
+          occ.add(node.id, trunk.pts);
+          origin.hx = heading.x;
+          if (mirror === -1) node.side = node.side === 'r' ? 'l' : 'r';
+          return trunk;
+        }
+      }
+    }
+    node.angle = angle;
+    return null;
   }
 
   private destroyWorld() {
@@ -377,8 +437,14 @@ export class Engine {
     w.stem.dispose();
     for (const o of w.ornaments) o.mesh.dispose();
     for (const t of w.twigs) t.mesh.dispose();
+    if (w.foliage) {
+      w.foliage.dispose();
+      this.scene.remove(w.foliage.mesh);
+    }
     w.markers.dispose();
     this.scene.remove(w.markers.mesh);
+    w.leaves.dispose();
+    this.scene.remove(w.leaves.mesh);
     this.scene.remove(w.group);
     w.overlay.dispose();
   }
@@ -644,10 +710,10 @@ export class Engine {
     this.rig.maxDist = this.frameFor(null).dist * 1.35;
   }
 
-  /** one clean tapered line, grown from a point at an angle: the building block of every twig */
-  private makeTwig(id: string, A: { x: number; y: number; z: number }, a: number, len: number, curl: number, owner: TreeNode, depth: number): BranchMesh {
+  /** the node a twig is drawn from: one clean tapered line, grown from a point at an angle */
+  private twigNode(id: string, A: { x: number; y: number }, a: number, len: number, curl: number, owner: TreeNode, depth: number): TreeNode {
     const end = a + curl * 0.5;
-    const node: TreeNode = {
+    return {
       id,
       title: '',
       description: '',
@@ -665,43 +731,84 @@ export class Engine {
       clearance: 2.2,
       number: '',
     };
-    const mesh = new BranchMesh(node, { x: A.x, y: A.y }, A.z, { x: Math.cos(a), y: Math.sin(a) }, this.shared);
-    mesh.setVisible(false);
-    this.world.group.add(mesh.group);
-    return mesh;
+  }
+
+  /**
+   * A twig that keeps clear of everything standing. It tries the angle it was given, small nudges of it, the
+   * other side of its parent, and ever shorter reaches; if nothing is clear the twig is simply not grown.
+   */
+  private fitTwig(id: string, A: { x: number; y: number; z: number }, base: number, sign: number, off: number, len: number, curl: number, owner: TreeNode, depth: number): BranchMesh | null {
+    const { occ, group } = this.world;
+    const tries: [number, number][] = [
+      [sign, off],
+      [sign, off * 0.78],
+      [sign, off * 1.22],
+      [-sign, off],
+    ];
+    for (const k of [1, 0.85, 0.7, 0.56, 0.44]) {
+      for (const [sg, o] of tries) {
+        const a = base + sg * o;
+        const node = this.twigNode(id, A, a, len * k, sg * curl, owner, depth);
+        const heading = { x: Math.cos(a), y: Math.sin(a) };
+        const trunk = generateTrunk(node, A, A.z, heading, new Rng(id + ':trunk'));
+        if (occ.clashes(trunk.pts, id, GAP, A, FREE)) continue;
+        occ.add(id, trunk.pts);
+        const mesh = new BranchMesh(node, { x: A.x, y: A.y }, A.z, heading, this.shared, trunk);
+        mesh.setVisible(false);
+        group.add(mesh.group);
+        return mesh;
+      }
+    }
+    return null;
   }
 
   /** every primary bough forks into twigs that fork again: a branching system, not a single wire */
   private buildTwigs() {
     const w = this.world;
-    if (w.twigs.length) return;
+    if (w.foliage) return;
     const low = this.quality === 'low';
+    const specs = [
+      { t: 0.3, off: 0.95, len: 4.2, delay: 0.1 },
+      { t: 0.5, off: 0.7, len: 3.5, delay: 0.25 },
+      { t: 0.7, off: 0.5, len: 2.6, delay: 0.4 },
+    ];
+    // every bough's own twigs first, then the forks of those: a fork gives way to a twig, never the other way round
+    const forks: { rt: NodeRT; p: TreeNode; pi: number; k: number; len: number; delay: number; twig: BranchMesh }[] = [];
     w.model.primaries.forEach((p, pi) => {
       const rt = w.rts.get(p.id)!;
       const bough = this.branchFor(rt);
-      const specs = [
-        { t: 0.3, off: 0.95, len: 4.2, delay: 0.1 },
-        { t: 0.5, off: 0.7, len: 3.5, delay: 0.25 },
-        { t: 0.7, off: 0.5, len: 2.6, delay: 0.4 },
-      ];
       specs.forEach((sp, k) => {
         const f = bough.sample(sp.t);
         const base = Math.atan2(f.ty, f.tx);
         // fork off on whichever side climbs
         const sign = Math.sin(base + 0.7) >= Math.sin(base - 0.7) ? 1 : -1;
-        const a = base + sign * sp.off;
-        const twig = this.makeTwig(`twig-${pi}-${k}`, f, a, sp.len, sign * 0.7, p, 5);
-        w.twigs.push({ rt, mesh: twig, fade: 0, delay: sp.delay });
-        if (low || k === 2) return;
-        // each of the first two forks once more
-        const g = twig.sample(0.58);
-        const tb = Math.atan2(g.ty, g.tx);
-        const s2 = Math.sin(tb + 0.8) >= Math.sin(tb - 0.8) ? 1 : -1;
-        const sub = this.makeTwig(`twig-${pi}-${k}s`, g, tb + s2 * 0.8, sp.len * 0.5, s2 * 0.6, p, 6);
-        w.twigs.push({ rt, mesh: sub, fade: 0, delay: sp.delay + 0.3 });
+        const twig = this.fitTwig(`twig-${pi}-${k}`, f, base, sign, sp.off, sp.len, 0.7, p, 5);
+        if (!twig) return;
+        w.twigs.push({ rt, mesh: twig, fade: 0, delay: sp.delay, leaf: -1 });
+        if (!low && k < 2) forks.push({ rt, p, pi, k, len: sp.len, delay: sp.delay, twig });
       });
     });
-  }
+    for (const { rt, p, pi, k, len, delay, twig } of forks) {
+      // each of the first two forks once more
+      const g = twig.sample(0.58);
+      const tb = Math.atan2(g.ty, g.tx);
+      const s2 = Math.sin(tb + 0.8) >= Math.sin(tb - 0.8) ? 1 : -1;
+      const sub = this.fitTwig(`twig-${pi}-${k}s`, g, tb, s2, 0.8, len * 0.5, 0.6, p, 6);
+      if (sub) w.twigs.push({ rt, mesh: sub, fade: 0, delay: delay + 0.3, leaf: -1 });
+    }
+
+    // leaves, in the colours of the branch each one grows on
+    const sources: FoliageSource[] = [];
+    for (const o of w.ornaments) {
+      o.leaf = sources.length;
+      sources.push({ id: o.mesh.node.id, trunk: o.mesh.trunk, palette: o.mesh.node.palette });
+    }
+    for (const t of w.twigs) {
+      t.leaf = sources.length;
+      sources.push({ id: t.mesh.node.id, trunk: t.mesh.trunk, palette: t.mesh.node.palette });
+    }
+    w.foliage = new Foliage(sources, this.shared, w.occ, { sway: !this.reduced, density: low ? 0.6 : 1 });
+    this.scene.add(w.foliage.mesh);  }
 
   /** where a node's own branch starts: the fork on the stem for primaries, the parent otherwise */
   private startOf(node: TreeNode): { x: number; y: number } {
@@ -1507,6 +1614,7 @@ export class Engine {
       rt.flare *= fd;
       if (rt.vis < 0.002 && rt.visT === 0) rt.vis = 0;
       w.markers.set(rt.i, rt.vis, rt.act, rt.hov, rt.flare);
+      w.leaves.set(rt.i, rt.vis, rt.act, rt.hov, rt.flare);
       w.overlay.setVis(rt.node.id, rt.vis);
       const b = rt.branch;
       if (b) {
@@ -1521,6 +1629,7 @@ export class Engine {
       }
     }
     w.markers.commit();
+    w.leaves.commit();
 
     // ── the stem: always standing once grown, lit by the energy that climbs it
     const st = w.stem;
@@ -1542,6 +1651,7 @@ export class Engine {
       m.setVisible(p > 0.0005);
       m.setGhostDim(0.95 + this.stemFlare * 0.4);
       m.setGhostBoost(1.7);
+      w.foliage?.set(o.leaf, p, this.stemFlare);
     }
 
     for (let i = this.flashes.length - 1; i >= 0; i--) {
@@ -1559,7 +1669,9 @@ export class Engine {
       tw.mesh.setVisible(g > 0.0005);
       tw.mesh.setGhostDim(0.9);
       tw.mesh.setGhostBoost(1.4 + rt.hov * 1.0);
+      w.foliage?.set(tw.leaf, g, rt.hov);
     }
+    w.foliage?.commit();
 
     // while the seed waits, a soft ripple reminds you it is the way in
     if (!this.started && this.ready && time - this.lastInvite > 5.2) {
