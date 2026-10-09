@@ -1,7 +1,5 @@
 'use client';
 
-import { answers } from '@/data/answers';
-import { hooks } from '@/data/hooks';
 import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import type { RevealState } from '@/engine/types';
@@ -56,7 +54,7 @@ export default function RevealCard({ reveal, onBox, onOpen, onPeek }: Props) {
   useEffect(() => {
     const el = ref.current;
     if (!reveal || !el) return;
-    const phone = window.matchMedia('(max-width: 700px)');
+    const phone = window.matchMedia('(max-width: 900px)');
     const report = () => onBox({ side: phone.matches ? 'b' : reveal.side, w: el.offsetWidth, h: el.offsetHeight });
     report();
     const ro = new ResizeObserver(report);
@@ -83,24 +81,28 @@ export default function RevealCard({ reveal, onBox, onOpen, onPeek }: Props) {
   return (
     <aside ref={ref} className="reveal" data-show={reveal && lit === reveal.seq ? 1 : 0} data-side={shown.side} aria-label={`About ${shown.title}`} aria-live="polite" aria-hidden={!reveal} style={vars}>
       <div className="reveal__body">
-        <section className="reveal__block reveal__answer rv" style={line(0)} aria-label={`Answer: ${hooks[shown.id] ?? ''}`}>
-          <h3 className="reveal__label">The answer</h3>
-          <p className="reveal__text">{tie(answers[shown.id] ?? fact.why)}</p>
-        </section>
-        <div className="reveal__rule rv" style={line(1)} role="presentation" />
-        <div className="reveal__head">
-          <p className="reveal__value rv" style={line(2)}>
-            {fact.stat.value}
-          </p>
-          <p className="reveal__caption rv" style={line(3)}>
-            {tie(fact.stat.label)}
+        <div className="reveal__top rv" style={line(0)}>
+          <h3 className="reveal__label">{shown.title}</h3>
+        </div>
+        <div className="reveal__main">
+          <div className="reveal__head">
+            <p className="reveal__value rv" style={line(1)}>
+              {fact.stat.value}
+            </p>
+            <p className="reveal__caption rv" style={line(2)}>
+              {tie(fact.stat.label)}
+            </p>
+          </div>
+          <p className="reveal__text reveal__why rv" style={line(3)}>
+            {tie(fact.why)}
           </p>
         </div>
+        <div className="reveal__rule rv" style={line(4)} role="presentation" />
         {hook ? (
           <button
             type="button"
             className="reveal__block reveal__block--next reveal__hook rv"
-            style={line(4)}
+            style={line(5)}
             aria-label={`Open ${hook.title}: ${hook.teaser}`}
             tabIndex={reveal ? 0 : -1}
             onClick={() => onOpen(hook.id)}
@@ -113,22 +115,20 @@ export default function RevealCard({ reveal, onBox, onOpen, onPeek }: Props) {
             onBlur={() => onPeek(null)}
           >
             <span className="reveal__hookBody">
-              <span className="reveal__label">{hook.title}</span>
-              <span className="reveal__text">{hook.teaser}</span>
+              <span className="reveal__label">Next</span>
+              <span className="reveal__text">{hook.title}</span>
+              <span className="reveal__sub">{tie(hook.teaser)}</span>
             </span>
             <span className="reveal__go" aria-hidden="true">
               →
             </span>
           </button>
         ) : (
-          <section className="reveal__block reveal__block--next rv" style={line(4)}>
-            <h3 className="reveal__label">What’s next</h3>
+          <section className="reveal__block reveal__block--next rv" style={line(5)}>
+            <h3 className="reveal__label">Next</h3>
             <p className="reveal__text">{tie(fact.next)}</p>
           </section>
         )}
-        <p className="reveal__meta rv" style={line(5)}>
-          {shown.opened} of {shown.total} opened
-        </p>
       </div>
     </aside>
   );

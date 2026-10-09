@@ -42,6 +42,8 @@ export default function Experience() {
 
   const home = useCallback(() => engineRef.current?.home(), []);
   const select = useCallback((id: string) => engineRef.current?.select(id), []);
+  const branch = useCallback((c: number) => engineRef.current?.branch(c), []);
+  const indexOpen = useCallback((open: boolean) => engineRef.current?.setIndexOpen(open), []);
   const mute = useCallback(() => engineRef.current?.toggleMute(), []);
   const cardBox = useCallback((box: CardBox | null) => engineRef.current?.setCardBox(box), []);
   const peek = useCallback((id: string | null, viaKey = false, at?: { x: number; y: number }) => engineRef.current?.peek(id, viaKey, at ?? null), []);
@@ -59,7 +61,7 @@ export default function Experience() {
           </p>
         </div>
       ) : (
-        <Hud state={state} meta={meta} onHome={home} onSelect={select} onMute={mute} onCardBox={cardBox} onPeek={peek} />
+        <Hud state={state} meta={meta} onHome={home} onSelect={select} onBranch={branch} onIndex={indexOpen} onMute={mute} onCardBox={cardBox} onPeek={peek} />
       )}
       <noscript>
         <p className="fallback">This experience requires JavaScript.</p>

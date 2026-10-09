@@ -88,6 +88,17 @@ export interface RevealState {
   hook: { id: string; title: string; teaser: string } | null;
 }
 
+/** one row of the index: a branch, its two colours and how much of it you have opened */
+export interface BranchIndexItem {
+  id: string;
+  title: string;
+  a: string;
+  b: string;
+  opened: number;
+  total: number;
+  done: boolean;
+}
+
 /** a branch (or the whole tree) has just been completed */
 export interface FinaleState {
   seq: number;

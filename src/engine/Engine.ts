@@ -29,11 +29,10 @@ import type { NodeRole } from './Overlay';
 import { generateTrunk } from './trunk';
 import type { P, Trunk } from './trunk';
 import { facts } from '@/data/facts';
-import { hooks } from '@/data/hooks';
 import { Blossoms } from './Blossoms';
 import { loadProgress, saveProgress } from './progress';
 import { SIGNATURE } from './signature';
-import type { CategoryData, FinaleState, RevealState, TreeNode } from './types';
+import type { BranchIndexItem, CategoryData, FinaleState, RevealState, TreeNode } from './types';
 
 export interface EngineState {
   path: { id: string; title: string }[];
@@ -49,6 +48,8 @@ export interface EngineState {
   reveal: RevealState | null;
   /** a branch (or the whole tree) was just completed */
   finale: FinaleState | null;
+  /** the six branches with how much of each is open: the index */
+  index: BranchIndexItem[];
 }
 
 type Listener = (s: EngineState) => void;
@@ -184,6 +185,11 @@ export class Engine {
   /** the keyboard cursor: a virtual pointer that glides to the focused node, so keyboard focus gets the same light as the mouse */
   private kbPtr = { x: 0, y: 0, vx: 0, vy: 0, ready: false };
   private hoverViaKey = false;
+  private indexOpen = false;
+  /** the cards you have seen, in order: N and P walk through them, like pages */
+  private trail: string[] = [];
+  private trailPos = -1;
+  private trailTarget: string | null = null;
   /** the hover comes from the card's hook: the light stays on the button (`hoverAt` when the keyboard holds it) while the node it points at glows */
   private hoverUi = false;
   private hoverAt: { x: number; y: number } | null = null;
@@ -277,6 +283,17 @@ export class Engine {
       current: cur ? { title: cur.title, description: cur.description } : null,
       reveal: this.reveal,
       finale: this.finale,
+      index: this.world
+        ? this.world.model.primaries.map((p, c) => ({
+            id: p.id,
+            title: p.title,
+            a: hexOf(p.palette.a),
+            b: hexOf(p.palette.b),
+            opened: this.countVisited(c),
+            total: this.totals[c] ?? 0,
+            done: this.done.has(c),
+          }))
+        : [],
     };
   }
 
@@ -654,7 +671,9 @@ export class Engine {
         e.preventDefault();
         this.keyOpen();
       } else if (k.toLowerCase() === 'n' && !e.repeat) {
-        this.keyOpen(true);
+        this.keyCard(1);
+      } else if (k.toLowerCase() === 'p' && !e.repeat) {
+        this.keyCard(-1);
       } else if (/^[1-6]$/.test(k) && !e.repeat) {
         this.keyBranch(Number(k) - 1);
       } else if (k === '+' || k === '=') {
@@ -1403,6 +1422,13 @@ export class Engine {
       this.reveal = null;
       return;
     }
+    // a card reached by walking the trail keeps its place; a new one is added after the current page
+    if (this.trailTarget === node.id) this.trailTarget = null;
+    else if (this.trail[this.trailPos] !== node.id) {
+      this.trail.length = this.trailPos + 1;
+      this.trail.push(node.id);
+      this.trailPos = this.trail.length - 1;
+    }
     const dur = SIGNATURE[node.style].dur * (this.reduced ? 0.8 : 1) * (finishing ? FINALE.stretch : 1);
     const target = this.nextTarget(node);
     this.reveal = {
@@ -1415,7 +1441,7 @@ export class Engine {
       opened: this.countVisited(node.catIndex),
       total: this.totals[node.catIndex],
       delay: dur * (grown ? 0.78 : 0.4),
-      hook: target && hooks[target.id] ? { id: target.id, title: target.title, teaser: hooks[target.id] } : null,
+      hook: target && facts[target.id] ? { id: target.id, title: target.title, teaser: facts[target.id].why } : null,
     };
     // when the hook appears, the node it points at gives a small glint, so the eye knows where it leads
     if (target && this.reveal.hook && !this.reduced) {
@@ -1520,6 +1546,34 @@ export class Engine {
     if (best) this.select(best);
   }
 
+  /** the index pane is open at the top right: labels keep clear of it only while it is */
+  setIndexOpen(open: boolean) {
+    this.indexOpen = open;
+    this.applyCardBox();
+  }
+
+  /**
+   * N and P turn the cards like pages. P goes back to the card you saw before; N goes forward again, and from the newest
+   * card it opens the one the card suggests next.
+   */
+  private keyCard(dir: 1 | -1) {
+    if (this.destroyed) return;
+    this.audio.unlock();
+    if (!this.started) return this.home();
+    const to = this.trailPos + dir;
+    if (to >= 0 && to < this.trail.length) {
+      this.trailPos = to;
+      this.trailTarget = this.trail[to];
+      this.select(this.trail[to]);
+    } else if (dir === 1) this.keyOpen(true);
+    else this.audio.tick();
+  }
+
+  /** the index jumps to a branch, like its number key */
+  branch(c: number) {
+    this.keyBranch(c);
+  }
+
   /** the number keys jump to a branch */
   private keyBranch(c: number) {
     const p = this.world.model.primaries[c];
@@ -1561,6 +1615,8 @@ export class Engine {
       const half = Math.min(this.w * 0.4, 300);
       rects.push({ x0: this.w / 2 - half, x1: this.w / 2 + half, y0: 0, y1: this.w < 700 ? 160 : 130 });
     }
+    // the index sits at the top right while it is open on a roomy screen (see .index in the stylesheet)
+    if (this.indexOpen && this.w >= 1200 && this.h >= 760) rects.push({ x0: this.w - 26 - 264 - pad, x1: this.w, y0: 0, y1: 22 + 270 + pad });
     this.world.overlay.setReserve(rects);
   }
 
