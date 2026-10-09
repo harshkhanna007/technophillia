@@ -26,6 +26,16 @@ const FLAVOR: Record<StyleId, Flavor> = {
   quantum: { root: 261.63, scale: [0, 2, 4, 6, 8, 10], pad: ['sine', 'sine'], cutoff: 900 }, // C whole tone: weightless
 };
 
+/** the chord roots (as scale degrees) a branch walks when it is finished: it ends at home, with every voice sounding */
+const CADENCE: Record<StyleId, number[]> = {
+  neural: [0, 2, 3, 0],
+  mechanical: [0, 3, 4, 0],
+  organic: [0, 2, 3, 0],
+  chaotic: [0, 3, 4, 0],
+  network: [0, 1, 4, 0],
+  quantum: [0, 2, 4, 0],
+};
+
 /** voices in the chord, and how loud each one sits once it has joined */
 const HARMONY = 6;
 const PAD_VOL = [0.026, 0.021, 0.021, 0.021, 0.021, 0.021];
@@ -47,7 +57,7 @@ export class AudioEngine {
   private ambient: { stop(): void } | null = null;
   muted: boolean;
   private lastHover = 0;
-  private harmony: { style: StyleId | null; swap: number; voices: { a: OscillatorNode; b: OscillatorNode; g: GainNode; lp: BiquadFilterNode }[] } | null = null;
+  private harmony: { style: StyleId | null; swap: number; bus: GainNode; voices: { a: OscillatorNode; b: OscillatorNode; g: GainNode; lp: BiquadFilterNode }[] } | null = null;
 
   constructor() {
     let m = false;
@@ -441,6 +451,85 @@ export class AudioEngine {
     }
   }
 
+  /** a held chord voice: two detuned oscillators through a low-pass that opens as it swells, with a long release */
+  private swell(f: number, t0: number, hold: number, rel: number, peak: number, types: [OscillatorType, OscillatorType], cutoff: number, attack = 0.55) {
+    const ctx = this.ctx!;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.Q.value = 0.7;
+    lp.frequency.setValueAtTime(cutoff * 0.45, t0);
+    lp.frequency.exponentialRampToValueAtTime(cutoff, t0 + attack * 1.6);
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(peak, t0 + attack);
+    g.gain.setValueAtTime(peak, t0 + hold);
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + hold + rel);
+    for (let i = 0; i < 2; i++) {
+      const o = ctx.createOscillator();
+      o.type = types[i];
+      o.frequency.value = f;
+      o.detune.value = i ? 6 : -4;
+      o.connect(lp);
+      o.start(t0);
+      o.stop(t0 + hold + rel + 0.1);
+    }
+    lp.connect(g).connect(this.out(0.6));
+  }
+
+  /** the pad steps back while a finale plays, then returns */
+  private duckHarmony(t: number, to: number, secs: number) {
+    const bus = this.harmony?.bus;
+    if (!bus) return;
+    bus.gain.cancelScheduledValues(t);
+    bus.gain.setTargetAtTime(to, t, 0.25);
+    bus.gain.setTargetAtTime(1, t + secs, 1.2);
+  }
+
+  /**
+   * The finish of a branch, or of the whole tree. A branch walks its own cadence home with all six chord voices and a run of
+   * bells up its scale while the twigs open; the tree stacks every branch's root into one cluster and resolves it to C major.
+   */
+  finale(style: StyleId | null, kind: 'branch' | 'tree' = 'branch') {
+    if (!this.ctx || this.muted) return;
+    const t = this.ctx.currentTime;
+    if (kind === 'tree' || !style) return this.treeFinale(t);
+    this.duckHarmony(t, 0.22, 10);
+    const flavor = FLAVOR[style];
+    const starts = [0.3, 1.9, 3.5, 5.1].map((x) => t + x);
+    CADENCE[style].forEach((root, i) => {
+      const last = i === CADENCE[style].length - 1;
+      for (let k = 0; k < HARMONY; k++) {
+        this.swell(this.note(style, root + k * 2, PAD_OCT[k]), starts[i], last ? 3.2 : 1.7, last ? 2.8 : 0.9, 0.0165 * (k === 0 ? 1.2 : 1), flavor.pad, flavor.cutoff * (1.2 + 0.2 * i));
+      }
+      const bass = this.note(style, root, -2);
+      this.osc('sine', bass, bass, starts[i], last ? 4.6 : 2.2, last ? 0.07 : 0.045, 0.08, 0.3);
+    });
+    // the bloom: a run of bells up the scale, in step with the petals opening
+    for (let i = 0; i < 10; i++) this.bell(this.note(style, i, 1), t + 1.2 + i * 0.28, 1.4, 0.026, 0.8);
+    // the last chord lands with a lead-in swell and a ring of high bells
+    this.noiseVoice(starts[3] - 0.7, 0.7, 0.04, { type: 'bandpass', f0: 500, f1: 5200, q: 2 }, 0.01, 0.6, true);
+    [0, 2, 4].forEach((d, n) => this.bell(this.note(style, d, 2), starts[3] + 0.05 * n, 3.2, 0.03, 0.9));
+  }
+
+  private treeFinale(t: number) {
+    this.duckHarmony(t, 0.18, 14);
+    const styles = Object.keys(FLAVOR) as StyleId[];
+    // each branch speaks once, in step with its moment
+    styles.forEach((st, i) => this.bell(this.note(st, 0, 2), t + 0.2 + i * 0.45, 2.2, 0.032, 0.8));
+    // the six roots stack into one shimmering cluster…
+    const at = t + 2.6;
+    const roots = styles.map((st) => FLAVOR[st].root).sort((a, b) => a - b);
+    roots.forEach((f, i) => this.swell(f, at, 2.2, 0.8, 0.014, ['sine', 'triangle'], 1100, 0.7 + i * 0.05));
+    // …and resolve into one open C major chord
+    const home = t + 5;
+    [130.81, 196, 261.63, 329.63, 392, 523.25].forEach((f, i) => this.swell(f, home, 4, 3.5, 0.016 * (i === 0 ? 1.2 : 1), ['sine', 'triangle'], 1500, 0.8));
+    this.osc('sine', 65.41, 65.41, home, 7.5, 0.08, 0.1, 0.3);
+    this.noiseVoice(home - 0.8, 0.8, 0.045, { type: 'bandpass', f0: 500, f1: 5600, q: 2 }, 0.01, 0.6, true);
+    // a run of bells up C major pentatonic as the flowers open, ending on a high C
+    [523.25, 587.33, 659.25, 783.99, 880, 1046.5, 1318.5, 1568, 2093].forEach((f, i) => this.bell(f, t + 4.1 + i * 0.3, 1.8, 0.024, 0.85));
+    [659.25, 783.99, 1046.5].forEach((f, i) => this.shimmer(f, home + 0.2 * i, 3.5, 0.011));
+  }
+
   /** the chord under everything: voices are stacked in the current branch's scale and join one by one as more nodes open */
   setHarmony(style: StyleId | null, level: number) {
     if (!this.ctx) return;
@@ -479,6 +568,8 @@ export class AudioEngine {
     if (this.harmony) return this.harmony;
     const ctx = this.ctx!;
     const voices: NonNullable<AudioEngine['harmony']>['voices'] = [];
+    const bus = ctx.createGain();
+    bus.connect(this.out(0.55));
     for (let i = 0; i < HARMONY; i++) {
       const a = ctx.createOscillator();
       const b = ctx.createOscillator();
@@ -491,12 +582,12 @@ export class AudioEngine {
       g.gain.value = 0.0001;
       a.connect(lp);
       b.connect(lp);
-      lp.connect(g).connect(this.out(0.55));
+      lp.connect(g).connect(bus);
       a.start();
       b.start();
       voices.push({ a, b, g, lp });
     }
-    this.harmony = { style: null, swap: 0, voices };
+    this.harmony = { style: null, swap: 0, bus, voices };
     return this.harmony;
   }
 

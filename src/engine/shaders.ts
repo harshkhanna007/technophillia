@@ -827,6 +827,17 @@ void main(){
 }
 `;
 
+/** the exact lens the leaves are drawn with, shared by the bloom moment and the blossoms so petals and leaves are one family */
+const GLSL_LENS = /* glsl */ `
+float sdLens(vec2 p, float hw){
+  float tw = p.x > 0.0 ? pow(p.x, 0.8) : p.x;
+  float vr = 0.5 * (hw + 0.25 / hw);
+  float vd = 0.5 * (0.25 / hw - hw);
+  vec2 q = abs(vec2(p.y, tw - 0.5));
+  return ((q.y - 0.5) * vd > q.x * 0.5) ? length(q - vec2(0.0, 0.5)) : length(q - vec2(-vd, 0.0)) - vr;
+}
+`;
+
 /* ───────────────────────── signature moments: what each branch plays when one of its nodes opens ───────────────────────── */
 /* One quad, one fragment shader, six short films. `uAge` runs 0→1 over the moment; the beats are mirrored in signature.ts so the sound
    lands on them. Everything is drawn in the same hairline-neon language as the rest of the tree (additive, palette-tinted, pixel-aware line
@@ -870,14 +881,7 @@ float segH(vec2 p, vec2 a, vec2 b, out float h){
 }
 float seg(vec2 p, vec2 a, vec2 b){ float h; return segH(p, a, b, h); }
 float sdDiamond(vec2 p, float r){ return (abs(p.x) + abs(p.y)) * 0.70710678 - r; }
-/* the same exact lens the leaves are drawn with, so petals and leaves are one family */
-float sdLens(vec2 p, float hw){
-  float tw = p.x > 0.0 ? pow(p.x, 0.8) : p.x;
-  float vr = 0.5 * (hw + 0.25 / hw);
-  float vd = 0.5 * (0.25 / hw - hw);
-  vec2 q = abs(vec2(p.y, tw - 0.5));
-  return ((q.y - 0.5) * vd > q.x * 0.5) ? length(q - vec2(0.0, 0.5)) : length(q - vec2(-vd, 0.0)) - vr;
-}
+${GLSL_LENS}
 
 /* ── AI · a signal crosses a four-layer net ── */
 int layerCount(int l){ return l == 0 ? 3 : (l == 3 ? 2 : 4); }
@@ -1179,6 +1183,86 @@ void main(){
   float env = smoothstep(0.0, 0.05, t) * (1.0 - smoothstep(0.84, 1.0, t));
   float rim = 1.0 - smoothstep(0.88, 1.0, max(abs(vP.x), abs(vP.y)));
   gl_FragColor = vec4(col * env * rim * uPower, 1.0);
+  #include <colorspace_fragment>
+}
+`;
+
+/* ───────────────────────── blossoms: five-petal flowers that burst open along the twigs of a finished branch ───────────────────────── */
+/* One instance per flower. A flower waits for its twig to grow to it, then opens when the branch's bloom wave reaches it: the wave travels
+   from the base of the twig out to the tips. The petals are the same exact lens the leaves are drawn with. */
+export const BLOSSOM_VERT = /* glsl */ `
+attribute vec3 iPos;
+attribute vec3 iColA;
+attribute vec3 iAccent;
+attribute vec4 iFlower; // size, seed, appear (fraction along the twig), -
+attribute vec4 iState;  // twig progress, bloom
+uniform float uTime;
+uniform float uSway;
+varying vec2 vP;
+varying vec3 vColA;
+varying vec3 vAccent;
+varying vec4 vInfo; // open, seed, rotation, -
+void main(){
+  float seed = iFlower.y;
+  float here = smoothstep(iFlower.z, iFlower.z + 0.14, iState.x);
+  float x = clamp((iState.y - iFlower.z * 0.5) / 0.5, 0.0, 1.0);
+  float open = (1.0 - pow(1.0 - x, 3.0)) * (1.0 + 0.1 * sin(x * 3.14159)) * here;
+  float rot = seed * 6.2831 + uSway * uTime * 0.12 * (seed > 0.5 ? 1.0 : -1.0) + (1.0 - x) * 1.2;
+  float breath = 1.0 + uSway * 0.04 * sin(uTime * 1.3 + seed * 20.0);
+  float s = iFlower.x * (0.3 + 0.7 * open) * breath;
+  vP = position.xy;
+  vColA = iColA;
+  vAccent = iAccent;
+  vInfo = vec4(open, seed, rot, 0.0);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(iPos + vec3(position.xy * s * 1.5, 0.0), 1.0);
+  if (open < 0.003) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+}
+`;
+
+export const BLOSSOM_FRAG = /* glsl */ `
+varying vec2 vP;
+varying vec3 vColA;
+varying vec3 vAccent;
+varying vec4 vInfo;
+${GLSL_LENS}
+const float TAU = 6.28318531;
+/* one ring of petals: x = outline + body + vein, y = tip glint */
+vec2 petalRing(vec2 p, float n, float rot, float L, float hw, float lw){
+  float r = length(p);
+  float a = atan(p.y, p.x) - rot;
+  float sa = TAU / n;
+  float sector = floor((a + sa * 0.5) / sa);
+  float aa = a - sector * sa;
+  vec2 q = r * vec2(cos(aa), sin(aa));
+  float len = max(L, 1e-3);
+  vec2 lp = vec2((q.x - 0.07) / len, q.y / len);
+  float d = sdLens(lp, hw) * len;
+  float inside = 1.0 - smoothstep(-lw * 0.8, lw * 0.8, d);
+  float depthIn = clamp(-d / max(hw * len * 0.9, 1e-4), 0.0, 1.0);
+  float fill = inside * (0.1 + 0.3 * pow(depthIn, 1.3)) * (1.0 - 0.3 * clamp(lp.x, 0.0, 1.0));
+  float vein = exp(-pow(abs(lp.y) * len / (lw * 0.7), 2.0)) * inside * smoothstep(0.0, 0.12, lp.x) * (1.0 - smoothstep(0.5, 0.9, lp.x)) * 0.4;
+  vec2 tp = vec2(lp.x - 1.0, lp.y) * len;
+  float tip = exp(-dot(tp, tp) / max(lw * lw * 3.0, 1e-5));
+  return vec2(exp(-pow(d / lw, 2.0)) * 0.95 + fill + vein, tip);
+}
+void main(){
+  float open = vInfo.x;
+  float px = max(fwidth(vP.x), 1e-4);
+  float lw = max(0.035, px * 0.85);
+  float r = length(vP);
+  vec2 petalsOuter = petalRing(vP, 5.0, vInfo.z, 0.68 * open, 0.36, lw);
+  vec2 petalsInner = petalRing(vP, 5.0, vInfo.z + TAU / 10.0, 0.44 * open, 0.4, lw);
+  float heart = exp(-r * r * 110.0) * open;
+  float halo = exp(-r * r * 3.2) * 0.22 * open;
+  float stamens = 0.0;
+  for (int i = 0; i < 6; i++) {
+    vec2 c = vec2(cos(float(i) * 1.0472 + vInfo.z * 0.5), sin(float(i) * 1.0472 + vInfo.z * 0.5)) * 0.1 * open;
+    stamens += exp(-dot(vP - c, vP - c) / 0.0016);
+  }
+  vec3 hot = mix(vAccent, vec3(1.0), 0.65);
+  vec3 warm = mix(vColA, hot, 0.55);
+  vec3 col = vColA * (petalsOuter.x + petalsInner.x * 0.85 + halo) + warm * (heart * 1.1 + stamens * 0.5) + hot * (petalsOuter.y + petalsInner.y) * 0.5;
+  gl_FragColor = vec4(col * smoothstep(0.0, 0.25, open), 1.0);
   #include <colorspace_fragment>
 }
 `;

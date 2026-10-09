@@ -2,6 +2,9 @@
 
 import type { EngineState } from '@/engine/Engine';
 import type { ExperienceMeta } from '@/engine/types';
+import FinaleCaption from './FinaleCaption';
+import RevealCard from './RevealCard';
+import type { CardBox } from './RevealCard';
 
 interface Props {
   state: EngineState | null;
@@ -9,10 +12,15 @@ interface Props {
   onHome(): void;
   onSelect(id: string): void;
   onMute(): void;
+  onCardBox(box: CardBox | null): void;
+  onPeek(id: string | null, viaKey?: boolean, at?: { x: number; y: number }): void;
 }
 
-/** Deliberately tiny: a seed glyph that doubles as "home", a luminous breadcrumb trace, a sound switch. */
-export default function Hud({ state, meta, onHome, onSelect, onMute }: Props) {
+/**
+ * Deliberately tiny: a seed glyph that doubles as "home", a luminous breadcrumb trace, a sound switch.
+ * Two quiet layers sit above the stage: the card for the node you just opened, and the caption of a finale.
+ */
+export default function Hud({ state, meta, onHome, onSelect, onMute, onCardBox, onPeek }: Props) {
   const path = state?.path ?? [];
   const depth = path.length;
   const muted = state?.muted ?? false;
@@ -36,8 +44,8 @@ export default function Hud({ state, meta, onHome, onSelect, onMute }: Props) {
           </span>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
-          <span className="keys" data-show={depth > 0 ? 1 : 0}>
-            Esc retract · scroll zoom · F focus
+          <span className="keys" data-show={state?.started ? 1 : 0}>
+            Arrows move · Enter open · Esc back · + − zoom
           </span>
           <button type="button" className="sound" data-muted={muted ? 1 : 0} onClick={onMute} aria-pressed={!muted} aria-label={muted ? 'Unmute sound' : 'Mute sound'}>
             <span className="sound__bars" aria-hidden="true">
@@ -50,6 +58,8 @@ export default function Hud({ state, meta, onHome, onSelect, onMute }: Props) {
           </button>
         </div>
       </div>
+      <RevealCard reveal={state?.reveal ?? null} onBox={onCardBox} onOpen={onSelect} onPeek={onPeek} />
+      <FinaleCaption finale={state?.finale ?? null} />
     </div>
   );
 }

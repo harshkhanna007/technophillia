@@ -28,7 +28,12 @@ import { Overlay } from './Overlay';
 import type { NodeRole } from './Overlay';
 import { generateTrunk } from './trunk';
 import type { P, Trunk } from './trunk';
-import type { CategoryData, TreeNode } from './types';
+import { facts } from '@/data/facts';
+import { hooks } from '@/data/hooks';
+import { Blossoms } from './Blossoms';
+import { loadProgress, saveProgress } from './progress';
+import { SIGNATURE } from './signature';
+import type { CategoryData, FinaleState, RevealState, TreeNode } from './types';
 
 export interface EngineState {
   path: { id: string; title: string }[];
@@ -40,6 +45,10 @@ export interface EngineState {
   /** the seed has been clicked: the tree is growing or grown */
   started: boolean;
   current: { title: string; description: string } | null;
+  /** the card for the active node, once its own moment has played */
+  reveal: RevealState | null;
+  /** a branch (or the whole tree) was just completed */
+  finale: FinaleState | null;
 }
 
 type Listener = (s: EngineState) => void;
@@ -84,11 +93,15 @@ interface World {
   occ: Occupancy;
   /** leaves on the twigs and ornaments; built together with the twigs */
   foliage: Foliage | null;
+  /** flowers on the same twigs: they open when a branch is finished */
+  blossoms: Blossoms | null;
 }
 
 /** how close two strands may come, and how much of a twig next to its parent is exempt from that rule */
 const GAP = 0.38;
 const FREE = 1.1;
+/** a finale plays the node's own signature moment this much bigger and slower */
+const FINALE = { scale: 1.9, stretch: 1.35 };
 
 interface EnergyJob {
   branch: BranchMesh;
@@ -102,6 +115,7 @@ const BLOOM_BASE = 1.7;
 /** the closer you zoom on a node, the wider the view must stay once more of the tree is open (see frameFor) */
 const ZOOM = { levelStep: 1.7, perOpen: 0.6, share: 0.55, cap: 0.8 };
 const clamp = (v: number, a: number, b: number) => Math.max(a, Math.min(b, v));
+const hexOf = (c: THREE.Color) => '#' + c.getHexString(THREE.SRGBColorSpace);
 const growEase = (p: number) => 0.32 * p + 0.68 * (p * p * (3 - 2 * p));
 
 export class Engine {
@@ -167,6 +181,29 @@ export class Engine {
   private drag: { id: number; x: number; y: number; sx: number; sy: number; moved: boolean } | null = null;
   private touches = new Map<number, { x: number; y: number }>();
   private pinchPrev = 0;
+  /** the keyboard cursor: a virtual pointer that glides to the focused node, so keyboard focus gets the same light as the mouse */
+  private kbPtr = { x: 0, y: 0, vx: 0, vy: 0, ready: false };
+  private hoverViaKey = false;
+  /** the hover comes from the card's hook: the light stays on the button (`hoverAt` when the keyboard holds it) while the node it points at glows */
+  private hoverUi = false;
+  private hoverAt: { x: number; y: number } | null = null;
+  private kbPressUntil = 0;
+  private ptrMode: 'mouse' | 'key' = 'mouse';
+  /** what has been opened, which branches have had their finale, and how many nodes each branch has */
+  private visited = new Set<string>();
+  private done = new Set<number>();
+  private totals: number[] = [];
+  private reveal: RevealState | null = null;
+  private finale: FinaleState | null = null;
+  private revealSeq = 0;
+  private finaleSeq = 0;
+  /** each branch's bloom wave (0..1), and the one that sweeps the whole tree */
+  private bloomCat: { v: number }[] = [];
+  private bloomAll = { v: 0 };
+  /** branches whose twigs stay on show while their finale plays */
+  private finaleKeep = new Set<number>();
+  /** where the HUD has put the reveal card, so node labels keep clear of it */
+  private cardBox: { side: 'l' | 'r' | 'b'; w: number; h: number } | null = null;
 
   constructor(host: HTMLElement, private categories: CategoryData[]) {
     this.host = host;
@@ -201,6 +238,7 @@ export class Engine {
 
     this.buildFx();
     this.world = this.buildWorld(this.layoutKind());
+    this.initProgress();
     this.setupPost();
     this.bindEvents();
 
@@ -237,6 +275,8 @@ export class Engine {
       ready: this.ready,
       started: this.started,
       current: cur ? { title: cur.title, description: cur.description } : null,
+      reveal: this.reveal,
+      finale: this.finale,
     };
   }
 
@@ -251,6 +291,8 @@ export class Engine {
     if (this.destroyed) return;
     this.lastInput = performance.now();
     this.audio.unlock();
+    // pressing Enter on a node dips the light, like a click
+    if (this.hoverViaKey) this.kbPressUntil = performance.now() + 240;
     if (id === 'root') return this.home();
     const rt = this.world.rts.get(id);
     if (!rt) return;
@@ -365,7 +407,7 @@ export class Engine {
     model.ornaments = kept;
     const overlay = new Overlay(this.host, model.nodes, {
       select: (id) => this.select(id),
-      hover: (id) => this.setHover(id),
+      hover: (id, viaKey) => this.setHover(id, viaKey),
     });
     const rts = new Map<string, NodeRT>();
     const list: NodeRT[] = [];
@@ -402,7 +444,7 @@ export class Engine {
       }
       return out;
     });
-    return { kind, model, rts, list, markers, leaves, overlay, group, stem, ornaments, twigs: [], occ, foliage: null };
+    return { kind, model, rts, list, markers, leaves, overlay, group, stem, ornaments, twigs: [], occ, foliage: null, blossoms: null };
   }
 
   /**
@@ -445,6 +487,10 @@ export class Engine {
     if (w.foliage) {
       w.foliage.dispose();
       this.scene.remove(w.foliage.mesh);
+    }
+    if (w.blossoms) {
+      w.blossoms.dispose();
+      this.scene.remove(w.blossoms.mesh);
     }
     w.markers.dispose();
     this.scene.remove(w.markers.mesh);
@@ -502,6 +548,7 @@ export class Engine {
       this.rig.pTarget.set((e.clientX / this.w) * 2 - 1, -((e.clientY / this.h) * 2 - 1));
       this.dragView(e);
       const p = this.ptr;
+      const moved = Math.hypot(e.clientX - p.x, e.clientY - p.y);
       p.x = e.clientX;
       p.y = e.clientY;
       p.type = e.pointerType || 'mouse';
@@ -511,12 +558,15 @@ export class Engine {
         this.ptrPrev.y = p.y;
       }
       p.inside = true;
+      // the mouse takes the light back as soon as it really moves
+      if (this.hoverViaKey && moved > 2) this.hoverViaKey = false;
       this.lastInput = performance.now();
     };
     window.addEventListener('pointermove', move, { passive: true });
     this.cleanups.push(() => window.removeEventListener('pointermove', move));
 
     const down = (e: PointerEvent) => {
+      this.hoverViaKey = false;
       const p = this.ptr;
       p.x = e.clientX;
       p.y = e.clientY;
@@ -586,15 +636,34 @@ export class Engine {
     });
 
     const key = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
       this.lastInput = performance.now();
-      if (e.key === 'Escape' || e.key === 'Backspace') {
+      const k = e.key;
+      // a focused control (a node, a crumb, the sound switch) already answers Enter and Space itself
+      const onControl = (e.target as Element | null)?.closest?.('button, a') != null;
+      const arrows: Record<string, [number, number]> = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
+      if (k === 'Escape' || k === 'Backspace') {
         e.preventDefault();
         this.back();
-      } else if (e.key === 'Home') {
+      } else if (k === 'Home') {
         this.home();
-      } else if (e.key.toLowerCase() === 'm') {
+      } else if (k in arrows) {
+        e.preventDefault();
+        this.keyMove(arrows[k][0], arrows[k][1]);
+      } else if ((k === 'Enter' || k === ' ') && !onControl) {
+        e.preventDefault();
+        this.keyOpen();
+      } else if (k.toLowerCase() === 'n' && !e.repeat) {
+        this.keyOpen(true);
+      } else if (/^[1-6]$/.test(k) && !e.repeat) {
+        this.keyBranch(Number(k) - 1);
+      } else if (k === '+' || k === '=') {
+        this.keyZoom(0.8);
+      } else if (k === '-' || k === '_') {
+        this.keyZoom(1.25);
+      } else if (k.toLowerCase() === 'm') {
         this.toggleMute();
-      } else if (e.key.toLowerCase() === 'f') {
+      } else if (k.toLowerCase() === 'f') {
         this.dive();
       }
     };
@@ -630,6 +699,7 @@ export class Engine {
       this.rebuildWorld(kind);
     } else {
       this.setCameraLimits();
+      this.applyCardBox();
       if (this.started) this.rig.setTarget(this.frameFor(this.path[this.path.length - 1] ?? null, 1, this.diving), 1.6);
     }
   }
@@ -644,6 +714,10 @@ export class Engine {
     this.gctx = gsap.context(() => {});
     this.destroyWorld();
     this.world = this.buildWorld(kind);
+    this.reveal = null;
+    this.finale = null;
+    this.finaleKeep.clear();
+    this.applyCardBox();
     this.path = [];
     this.buds.clear();
     this.hoverId = null;
@@ -813,7 +887,10 @@ export class Engine {
       sources.push({ id: t.mesh.node.id, trunk: t.mesh.trunk, palette: t.mesh.node.palette });
     }
     w.foliage = new Foliage(sources, this.shared, w.occ, { sway: !this.reduced, density: low ? 0.6 : 1 });
-    this.scene.add(w.foliage.mesh);  }
+    this.scene.add(w.foliage.mesh);
+    w.blossoms = new Blossoms(sources, this.shared, w.occ, { sway: !this.reduced, density: low ? 0.6 : 1 });
+    this.scene.add(w.blossoms.mesh);
+  }
 
   /** where a node's own branch starts: the fork on the stem for primaries, the parent otherwise */
   private startOf(node: TreeNode): { x: number; y: number } {
@@ -1021,7 +1098,10 @@ export class Engine {
     }
   }
 
-  private setHover(id: string | null) {
+  private setHover(id: string | null, viaKey = false, ui = false, at: { x: number; y: number } | null = null) {
+    this.hoverViaKey = viaKey && id !== null;
+    this.hoverUi = ui && id !== null;
+    this.hoverAt = this.hoverUi ? at : null;
     if (this.hoverId === id) return;
     const prev = this.hoverId ? this.world.rts.get(this.hoverId) : null;
     if (prev) {
@@ -1190,6 +1270,7 @@ export class Engine {
   }
 
   private grow(node: TreeNode) {
+    this.reveal = null;
     const rt = this.world.rts.get(node.id)!;
     const branch = this.branchFor(rt);
     branch.ensureDetail(this.profile.detail);
@@ -1250,6 +1331,8 @@ export class Engine {
     if (grown) rt.grown = true;
     rt.hovT = this.hoverId === node.id ? 1 : 0;
     this.path = ancestry(node);
+    const finishing = this.visit(node);
+    this.setReveal(node, grown, finishing);
     this.refreshBuds();
     this.world.overlay.revealTitle(node.id, this.speed() > 1 ? 1.4 : 1);
     this.flareNode(node, 2.6);
@@ -1260,9 +1343,10 @@ export class Engine {
     this.flash(node.pos.x, node.pos.y, node.palette.a, 1.5, 11, 2.4);
     this.bloomSurge(1.3);
     this.audio.impact();
-    this.moments.fire(node, grown ? 1 : 0.6, this.reduced);
+    this.moments.fire(node, grown ? 1 : 0.6, this.reduced, finishing ? FINALE.scale : 1, finishing ? FINALE.stretch : 1);
     this.audio.signature(node.style, node.depth, node.index, grown);
     this.syncHarmony();
+    if (finishing) this.finaleBranch(node);
     this.haptic([10, 40, 18]);
     if (!this.reduced) {
       this.rig.impulse(-13 * this.weight);
@@ -1280,6 +1364,296 @@ export class Engine {
     this.audio.setHarmony(deepest ? deepest.style : null, open);
   }
 
+  /* ─────────────────────────── progress, reveal cards and finales ─────────────────────────── */
+  private initProgress() {
+    const { model } = this.world;
+    const n = model.primaries.length;
+    this.totals = new Array<number>(n).fill(0);
+    for (const nd of model.nodes) if (nd.depth >= 1 && nd.catIndex >= 0) this.totals[nd.catIndex]++;
+    const saved = loadProgress();
+    for (const id of saved.visited) if (id !== 'root' && model.byId.has(id)) this.visited.add(id);
+    for (const c of saved.done) if (c >= 0 && c < n) this.done.add(c);
+    // a branch that is already complete never replays its finale
+    for (let c = 0; c < n; c++) if (this.countVisited(c) >= this.totals[c]) this.done.add(c);
+    this.bloomCat = Array.from({ length: n }, (_, c) => ({ v: this.done.has(c) ? 1 : 0 }));
+    this.bloomAll = { v: this.done.size === n ? 1 : 0 };
+  }
+
+  private countVisited(cat: number) {
+    let n = 0;
+    for (const id of this.visited) if (this.world.model.byId.get(id)?.catIndex === cat) n++;
+    return n;
+  }
+
+  /** note that a node has been opened; true when this is the one that completes its branch for the first time */
+  private visit(node: TreeNode): boolean {
+    const first = !this.visited.has(node.id);
+    if (first) this.visited.add(node.id);
+    const c = node.catIndex;
+    const finishing = first && c >= 0 && !this.done.has(c) && this.countVisited(c) >= this.totals[c];
+    if (finishing) this.done.add(c);
+    if (first) saveProgress({ visited: [...this.visited], done: [...this.done] });
+    return finishing;
+  }
+
+  /** the card for the node that just opened, timed to slide in as its own moment finishes */
+  private setReveal(node: TreeNode, grown: boolean, finishing: boolean) {
+    const fact = facts[node.id];
+    if (!fact || node.catIndex < 0) {
+      this.reveal = null;
+      return;
+    }
+    const dur = SIGNATURE[node.style].dur * (this.reduced ? 0.8 : 1) * (finishing ? FINALE.stretch : 1);
+    const target = this.nextTarget(node);
+    this.reveal = {
+      seq: ++this.revealSeq,
+      id: node.id,
+      title: node.title,
+      colors: { a: hexOf(node.palette.a), accent: hexOf(node.palette.accent), b: hexOf(node.palette.b) },
+      side: node.side === 'r' ? 'l' : 'r',
+      fact,
+      opened: this.countVisited(node.catIndex),
+      total: this.totals[node.catIndex],
+      delay: dur * (grown ? 0.78 : 0.4),
+      hook: target && hooks[target.id] ? { id: target.id, title: target.title, teaser: hooks[target.id] } : null,
+    };
+    // when the hook appears, the node it points at gives a small glint, so the eye knows where it leads
+    if (target && this.reveal.hook && !this.reduced) {
+      const { seq, delay } = this.reveal;
+      this.g(() =>
+        gsap.delayedCall(delay + 0.7, () => {
+          if (this.reveal?.seq === seq) this.flareNode(target, 1);
+        }),
+      );
+    }
+  }
+
+  /**
+   * The next node to open from here: the first one after this node, in the order the tree tells its story, that you have
+   * not opened yet and can open right now (the children of the root and of every node on your path). Following these hooks
+   * walks the whole tree, branch by branch, and ends on the finale.
+   */
+  private nextTarget(node: TreeNode): TreeNode | null {
+    const { model, rts } = this.world;
+    const order = model.nodes.filter((n) => n.depth >= 1).sort((a, b) => a.catIndex - b.catIndex);
+    const at = order.indexOf(node);
+    if (at < 0) return null;
+    const openable = new Set<string>();
+    for (const owner of [model.root, ...ancestry(node)]) {
+      for (const c of owner.children) {
+        const rt = rts.get(c.id);
+        if (rt && !rt.grown && !rt.retracting) openable.add(c.id);
+      }
+    }
+    for (let i = 1; i < order.length; i++) {
+      const n = order[(at + i) % order.length];
+      if (openable.has(n.id) && !this.visited.has(n.id)) return n;
+    }
+    return null;
+  }
+
+  /** lights a node in the scene while the pointer rests on the card's hook, so you can see where it leads */
+  peek(id: string | null, viaKey = false, at: { x: number; y: number } | null = null) {
+    if (this.destroyed || this.busy) return;
+    this.setHover(id, viaKey, true, at);
+  }
+
+  /* ─────────────────────────── keyboard ─────────────────────────── */
+  /**
+   * An arrow key moves the keyboard cursor to the nearest node in that direction, judged by where nodes sit on screen:
+   * mostly straight ahead wins over nearer but off to the side. The cursor is real DOM focus, so the node blooms, its
+   * name shows, and Enter (or Space) opens it like a click.
+   */
+  private keyMove(dx: number, dy: number) {
+    if (this.destroyed) return;
+    this.audio.unlock();
+    if (!this.started) return;
+    const ov = this.world.overlay;
+    const list = ov.focusables(this.w, this.h);
+    if (!list.length) return;
+    const from = ov.focusedId() ?? this.path[this.path.length - 1]?.id ?? null;
+    const origin = from ? list.find((n) => n.id === from) : undefined;
+    const ox = origin ? origin.x : this.w / 2;
+    const oy = origin ? origin.y : this.h / 2;
+    let best: string | null = null;
+    let bestScore = Infinity;
+    for (const n of list) {
+      if (n.id === origin?.id) continue;
+      const vx = n.x - ox;
+      const vy = n.y - oy;
+      const along = vx * dx + vy * dy;
+      if (along < 6) continue;
+      const score = along + Math.abs(vx * dy - vy * dx) * 2;
+      if (score < bestScore) {
+        bestScore = score;
+        best = n.id;
+      }
+    }
+    if (best) ov.focus(best);
+    else this.audio.tick();
+  }
+
+  /**
+   * Enter or Space with no node under the cursor: begin if the seed is waiting, otherwise open the card's suggested next
+   * node, or failing that the openable node nearest the middle of the screen.
+   */
+  private keyOpen(nextOnly = false) {
+    if (this.destroyed) return;
+    this.audio.unlock();
+    if (!this.started) return this.home();
+    if (!nextOnly) {
+      const focused = this.world.overlay.focusedId();
+      if (focused) return this.select(focused);
+    }
+    const hook = this.reveal?.hook;
+    if (hook) return this.select(hook.id);
+    let best: string | null = null;
+    let bestD = Infinity;
+    for (const n of this.world.overlay.focusables(this.w, this.h)) {
+      if (!this.buds.has(n.id)) continue;
+      const d = Math.hypot(n.x - this.w / 2, n.y - this.h / 2);
+      if (d < bestD) {
+        bestD = d;
+        best = n.id;
+      }
+    }
+    if (best) this.select(best);
+  }
+
+  /** the number keys jump to a branch */
+  private keyBranch(c: number) {
+    const p = this.world.model.primaries[c];
+    if (!p || this.destroyed) return;
+    this.audio.unlock();
+    if (!this.started) return this.home();
+    const rt = this.world.rts.get(p.id);
+    if (rt && (rt.grown || this.buds.has(p.id))) this.select(p.id);
+  }
+
+  /** plus and minus zoom about the middle of the screen */
+  private keyZoom(factor: number) {
+    if (!this.started || this.destroyed) return;
+    this.rig.camera.updateMatrixWorld();
+    this.toWorld(this.w / 2, this.h / 2);
+    this.rig.zoomAbout(factor, this.ptrWorld.x, this.ptrWorld.y);
+  }
+
+  /** the HUD reports where the reveal card sits, so node labels keep clear of it */
+  setCardBox(box: { side: 'l' | 'r' | 'b'; w: number; h: number } | null) {
+    this.cardBox = box;
+    this.applyCardBox();
+  }
+
+  /** the screen the HUD has claimed: the reveal card, and the caption of a finale at the top centre */
+  private applyCardBox() {
+    const box = this.cardBox;
+    const rects: { x0: number; x1: number; y0: number; y1: number }[] = [];
+    const pad = 28;
+    if (box?.side === 'b') rects.push({ x0: 0, x1: this.w, y0: this.h - 76 - box.h - pad, y1: this.h });
+    else if (box) {
+      // the card is centred between the HUD rows (56px from the top, 84px from the bottom)
+      const y0 = (this.h - 28 - box.h) / 2 - pad;
+      const x0 = box.side === 'l' ? 0 : this.w - 26 - box.w - pad;
+      const x1 = box.side === 'l' ? 26 + box.w + pad : this.w;
+      rects.push({ x0, x1, y0, y1: y0 + box.h + pad * 2 });
+    }
+    if (this.finale) {
+      const half = Math.min(this.w * 0.4, 300);
+      rects.push({ x0: this.w / 2 - half, x1: this.w / 2 + half, y0: 0, y1: this.w < 700 ? 160 : 130 });
+    }
+    this.world.overlay.setReserve(rects);
+  }
+
+  private showFinale(f: Omit<FinaleState, 'seq'>, secs: number) {
+    const seq = ++this.finaleSeq;
+    this.finale = { seq, ...f };
+    this.applyCardBox();
+    this.emit();
+    this.g(() =>
+      gsap.delayedCall(secs, () => {
+        if (this.finale?.seq !== seq) return;
+        this.finale = null;
+        this.applyCardBox();
+        this.emit();
+      }),
+    );
+  }
+
+  /** a framing that holds a whole branch: its nodes and every twig that blooms on it */
+  private branchFraming(c: number): Framing {
+    let x0 = Infinity;
+    let x1 = -Infinity;
+    let y0 = Infinity;
+    let y1 = -Infinity;
+    const take = (x: number, y: number) => {
+      x0 = Math.min(x0, x);
+      x1 = Math.max(x1, x);
+      y0 = Math.min(y0, y);
+      y1 = Math.max(y1, y);
+    };
+    for (const n of this.world.model.nodes) if (n.catIndex === c) take(n.pos.x, n.pos.y);
+    for (const tw of this.world.twigs) {
+      if (tw.rt.node.catIndex !== c) continue;
+      const pts = tw.mesh.trunk.pts;
+      for (let i = 0; i < pts.length; i += 6) take(pts[i].x, pts[i].y);
+    }
+    const o = this.world.model.primaries[c].origin;
+    if (o) take(o.x, o.y);
+    const phone = this.world.kind === 'portrait';
+    return this.rig.fit(x0, x1, y0, y1, phone ? 2.2 : 3.4, phone ? 3.2 : 2.6);
+  }
+
+  /** the last node of a branch has opened: a grander moment, the twigs burst into bloom, the chord resolves home */
+  private finaleBranch(node: TreeNode) {
+    const w = this.world;
+    const c = node.catIndex;
+    const primary = w.model.primaries[c];
+    const sp = this.speed();
+    const calm = this.reduced;
+    const colors = { a: hexOf(primary.palette.a), accent: hexOf(primary.palette.accent), b: hexOf(primary.palette.b) };
+    this.showFinale({ kind: 'branch', title: primary.title, sub: `All ${this.totals[c]} opened`, colors }, 7.5 * sp);
+    this.audio.finale(node.style, 'branch');
+    this.finaleKeep.add(c);
+    const spark = primary.palette.a.clone().lerp(primary.palette.accent, 0.3);
+    const tips = w.twigs.filter((t) => t.rt.node.catIndex === c).map((t) => t.mesh.trunk.at(t.mesh.trunk.len));
+    this.g(() => {
+      // the root of the branch answers with its own moment
+      gsap.delayedCall(0.55 * sp, () => this.moments.fire(primary, 1, calm, 1.5, 1.2));
+      // the camera draws back to show the whole branch while the bloom wave runs out along its twigs
+      gsap.delayedCall(0.9 * sp, () => {
+        this.resetView();
+        this.rig.setTarget(this.branchFraming(c), 0.6 / sp);
+      });
+      gsap.to(this.bloomCat[c], { v: 1, duration: 3.4 * sp, delay: 1.3 * sp, ease: 'power2.out' });
+      gsap.delayedCall(1.4 * sp, () => this.bloomSurge(1.1));
+      // a burst of light at each twig tip as the wave reaches it
+      tips.forEach((p, i) => gsap.delayedCall((1.5 + (i / Math.max(1, tips.length)) * 2.6) * sp, () => this.sparks.burst(p.x, p.y, p.z, 26, { speed: 1.8, size: 5, life: 1.2, color: spark, hot: 0.5 })));
+      // once it is over the twigs rest again; the bloom stays
+      gsap.delayedCall(8.2 * sp, () => this.finaleKeep.delete(c));
+      if (this.done.size === w.model.primaries.length) gsap.delayedCall(8.4 * sp, () => this.finaleTree());
+    });
+  }
+
+  /** all six branches are complete: the tree takes a bow, every twig blooms at once and the six moments play in turn */
+  private finaleTree() {
+    if (this.destroyed) return;
+    const w = this.world;
+    const sp = this.speed();
+    const calm = this.reduced;
+    const n = w.model.primaries.length;
+    for (let c = 0; c < n; c++) this.finaleKeep.add(c);
+    if (this.busy) this.finish();
+    if (this.path.length) this.retractTo(w.model.root);
+    this.showFinale({ kind: 'tree', title: 'The tree is in bloom', sub: `All ${w.model.nodes.length - 1} opened`, colors: { a: '#37d8ff', accent: '#ffffff', b: '#7b5cff' } }, 10 * sp);
+    this.g(() => {
+      gsap.delayedCall(2 * sp, () => this.audio.finale(null, 'tree'));
+      w.model.primaries.forEach((p, i) => gsap.delayedCall((2.2 + i * 0.45) * sp, () => this.moments.fire(p, 1, calm, 1.5, 1.15)));
+      gsap.delayedCall(2.4 * sp, () => this.bloomSurge(1.8));
+      gsap.to(this.bloomAll, { v: 1, duration: 4 * sp, delay: 2.4 * sp, ease: 'power2.out' });
+      gsap.delayedCall(11 * sp, () => this.finaleKeep.clear());
+    });
+  }
+
   private ping(rt: NodeRT) {
     this.audio.select();
     this.flareNode(rt.node, 1.8);
@@ -1292,6 +1666,7 @@ export class Engine {
 
   /** re-activate an already grown branch that is not on the current path */
   private navigate(node: TreeNode) {
+    this.reveal = null;
     const chain = ancestry(node);
     this.audio.select();
     this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.a, 2.2, 1);
@@ -1305,6 +1680,7 @@ export class Engine {
   }
 
   private retractTo(anchor: TreeNode) {
+    this.reveal = null;
     const isHome = anchor.depth === 0;
     const remove: NodeRT[] = [];
     for (const rt of this.world.list) {
@@ -1545,16 +1921,57 @@ export class Engine {
     }
   }
 
+  /**
+   * While the keyboard holds a node, a virtual pointer glides to it with the same spring-and-light as the mouse, starting from
+   * wherever the mouse last was, so a key press reads as the light travelling to the node. Null when the mouse is in charge.
+   */
+  private keyboardPointer(dt: number): PointerState | null {
+    const rt = this.hoverViaKey && this.hoverId ? this.world.rts.get(this.hoverId) : null;
+    const sp = this.hoverAt ?? (rt && rt.role !== 'hidden' ? this.world.overlay.screenOf(rt.node.id) : null);
+    const k = this.kbPtr;
+    if (!sp) {
+      k.ready = false;
+      return null;
+    }
+    if (!k.ready) {
+      k.ready = true;
+      k.x = this.ptr.seen ? this.ptr.x : sp.x;
+      k.y = this.ptr.seen ? this.ptr.y : sp.y;
+      k.vx = 0;
+      k.vy = 0;
+    }
+    const f = this.reduced ? 1 : 1 - Math.exp(-dt * 11);
+    const nx = k.x + (sp.x - k.x) * f;
+    const ny = k.y + (sp.y - k.y) * f;
+    const kv = 1 - Math.exp(-dt * 12);
+    k.vx += ((nx - k.x) / dt - k.vx) * kv;
+    k.vy += ((ny - k.y) / dt - k.vy) * kv;
+    k.x = nx;
+    k.y = ny;
+    return { x: k.x, y: k.y, vx: k.vx, vy: k.vy, speed: Math.hypot(k.vx, k.vy), type: 'mouse', down: performance.now() < this.kbPressUntil, seen: true, inside: true };
+  }
+
   private updatePointer(dt: number) {
-    const p = this.ptr;
+    const real = this.ptr;
+    const virt = this.keyboardPointer(dt);
+    const p = virt ?? real;
+    const mode = virt ? 'key' : 'mouse';
+    if (mode !== this.ptrMode) {
+      // the hand-over between mouse and keyboard must not read as a leap
+      this.ptrMode = mode;
+      this.ptrPrev.x = p.x;
+      this.ptrPrev.y = p.y;
+    }
     const dx = p.x - this.ptrPrev.x;
     const dy = p.y - this.ptrPrev.y;
     this.ptrPrev.x = p.x;
     this.ptrPrev.y = p.y;
-    const k = 1 - Math.exp(-dt * 12);
-    p.vx += (dx / dt - p.vx) * k;
-    p.vy += (dy / dt - p.vy) * k;
-    p.speed = Math.hypot(p.vx, p.vy);
+    if (!virt) {
+      const k = 1 - Math.exp(-dt * 12);
+      real.vx += (dx / dt - real.vx) * k;
+      real.vy += (dy / dt - real.vy) * k;
+      real.speed = Math.hypot(real.vx, real.vy);
+    }
 
     const live = p.type === 'touch' ? p.down : p.seen && p.inside;
     this.pointerLive = live;
@@ -1586,11 +2003,12 @@ export class Engine {
     // the visible cursor (mouse / pen only)
     let target: CursorTarget | null = null;
     const rt = this.hoverId ? this.world.rts.get(this.hoverId) : null;
-    if (rt && rt.role !== 'hidden') {
+    if (this.hoverUi) target = { x: p.x, y: p.y, kind: 'ui' };
+    else if (rt && rt.role !== 'hidden') {
       const sp = this.world.overlay.screenOf(rt.node.id);
       if (sp) target = { x: sp.x, y: sp.y, kind: 'node' };
     } else if (this.overUi) target = { x: p.x, y: p.y, kind: 'ui' };
-    this.cursor.update(dt, p, target, '#' + color.getHexString(THREE.SRGBColorSpace));
+    this.cursor.update(dt, p, target, '#' + color.getHexString(THREE.SRGBColorSpace), !!virt);
   }
 
   /* ─────────────────────────── frame ─────────────────────────── */
@@ -1669,6 +2087,7 @@ export class Engine {
       m.setGhostDim(0.95 + this.stemFlare * 0.4);
       m.setGhostBoost(1.7);
       w.foliage?.set(o.leaf, p, this.stemFlare);
+      w.blossoms?.set(o.leaf, p, this.bloomAll.v);
     }
 
     for (let i = this.flashes.length - 1; i >= 0; i--) {
@@ -1679,7 +2098,8 @@ export class Engine {
     // twigs on each waiting bough: they grow outward with the bud and rest once the branch is opened
     for (const tw of w.twigs) {
       const rt = tw.rt;
-      const target = rt.visT > 0.5 && !rt.grown && !rt.pending && !rt.retracting ? 1 : 0;
+      const keep = this.finaleKeep.has(rt.node.catIndex);
+      const target = keep || (rt.visT > 0.5 && !rt.grown && !rt.pending && !rt.retracting) ? 1 : 0;
       tw.fade += (target - tw.fade) * (1 - Math.exp(-dt * (target ? 1.1 : 5)));
       const g = clamp((tw.fade - tw.delay) / (1 - tw.delay), 0, 1);
       tw.mesh.ghostProgress = g;
@@ -1687,8 +2107,10 @@ export class Engine {
       tw.mesh.setGhostDim(0.9);
       tw.mesh.setGhostBoost(1.4 + rt.hov * 1.0);
       w.foliage?.set(tw.leaf, g, rt.hov);
+      w.blossoms?.set(tw.leaf, g, Math.max(this.bloomCat[rt.node.catIndex]?.v ?? 0, this.bloomAll.v));
     }
     w.foliage?.commit();
+    w.blossoms?.commit();
 
     // while the seed waits, a soft ripple reminds you it is the way in
     if (!this.started && this.ready && time - this.lastInvite > 5.2) {

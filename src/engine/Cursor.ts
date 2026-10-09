@@ -52,7 +52,8 @@ export class Cursor {
     this.dot = el.querySelector('.cursor__dot');
   }
 
-  update(dt: number, p: PointerState, target: CursorTarget | null, color: string) {
+  /** `glide`: the pointer is the keyboard cursor travelling to a node, so the ring stretches along its path even with a target */
+  update(dt: number, p: PointerState, target: CursorTarget | null, color: string, glide = false) {
     const el = this.el;
     if (!el || !this.ring || !this.dot) return;
     const show = p.type !== 'touch' && p.seen && p.inside;
@@ -71,6 +72,8 @@ export class Cursor {
 
     // the dot is the pointer itself: zero latency
     this.dot.style.transform = `translate3d(${p.x.toFixed(1)}px,${p.y.toFixed(1)}px,0)`;
+    // over a control the ring alone frames it, so the dot never sits on top of a glyph
+    this.dot.style.opacity = target?.kind === 'ui' ? '0' : '';
 
     // ring: magnetic target + spring (interruptible: it always retargets from its current state)
     let tx = p.x;
@@ -95,7 +98,7 @@ export class Cursor {
     this.rs += (ts - this.rs) * ks;
 
     // stretch along the direction of travel (comet-like), relaxing to a circle when still or locked
-    const stretchT = this.reduced || target ? 0 : Math.min(0.4, p.speed / 2800);
+    const stretchT = this.reduced || (target && !glide) ? 0 : Math.min(0.4, p.speed / 2800);
     this.rStretch += (stretchT - this.rStretch) * (1 - Math.exp(-dt * 12));
     if (p.speed > 90) {
       const a = Math.atan2(p.vy, p.vx);

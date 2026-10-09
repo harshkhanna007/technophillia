@@ -29,7 +29,7 @@ export class Moments {
   private pool: Slot[] = [];
   private mats: THREE.ShaderMaterial[] = [];
 
-  constructor(shared: Shared, size = 3) {
+  constructor(shared: Shared, size = 8) {
     for (let i = 0; i < size; i++) {
       const u = {
         uPos: { value: new THREE.Vector3() },
@@ -54,15 +54,18 @@ export class Moments {
     }
   }
 
-  /** `power` softens a replay (re-visiting a node); `calm` drops flicker and glitch for reduced motion */
-  fire(node: TreeNode, power = 1, calm = false) {
+  /**
+   * `power` softens a replay (re-visiting a node); `calm` drops flicker and glitch for reduced motion.
+   * A finale plays the same film `scale` times bigger and `stretch` times slower.
+   */
+  fire(node: TreeNode, power = 1, calm = false, scale = 1, stretch = 1) {
     const slot = this.pool.find((s) => !s.live) ?? this.pool.reduce((a, b) => (b.age > a.age ? b : a));
     slot.live = true;
     slot.age = 0;
-    slot.dur = SIGNATURE[node.style].dur * (calm ? 0.8 : 1);
+    slot.dur = SIGNATURE[node.style].dur * (calm ? 0.8 : 1) * stretch;
     const u = slot.u;
     u.uPos.value.set(node.pos.x, node.pos.y, node.pos.z);
-    u.uSize.value = node.depth <= 1 ? 2.9 : node.depth === 2 ? 2.6 : 2.3;
+    u.uSize.value = (node.depth <= 1 ? 2.9 : node.depth === 2 ? 2.6 : 2.3) * scale;
     u.uAge.value = 0;
     u.uStyle.value = STYLE_INDEX[node.style];
     u.uSeed.value = (node.index * 0.6180339 + node.catIndex * 0.137) % 1;

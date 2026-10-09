@@ -28,7 +28,8 @@ interface Item {
 
 export interface OverlayHandlers {
   select(id: string): void;
-  hover(id: string | null): void;
+  /** `viaKey`: the node was reached with the keyboard, not the mouse */
+  hover(id: string | null, viaKey?: boolean): void;
 }
 
 interface Rect {
@@ -69,6 +70,8 @@ export class Overlay {
   private obst = new Float32Array(OBST_CAP);
   private obstN = 0;
   private lastW = 0;
+  /** screen areas the HUD has claimed (the reveal card, a finale caption): labels treat them like other labels and keep clear */
+  private reserve: Rect[] = [];
 
   constructor(
     host: HTMLElement,
@@ -130,17 +133,18 @@ export class Overlay {
 
       const onClick = () => this.h.select(node.id);
       const onEnter = () => this.h.hover(node.id);
+      const onFocus = () => this.h.hover(node.id, btn.matches(':focus-visible'));
       const onLeave = () => this.h.hover(null);
       btn.addEventListener('click', onClick);
       btn.addEventListener('pointerenter', onEnter);
       btn.addEventListener('pointerleave', onLeave);
-      btn.addEventListener('focus', onEnter);
+      btn.addEventListener('focus', onFocus);
       btn.addEventListener('blur', onLeave);
       this.disposers.push(() => {
         btn.removeEventListener('click', onClick);
         btn.removeEventListener('pointerenter', onEnter);
         btn.removeEventListener('pointerleave', onLeave);
-        btn.removeEventListener('focus', onEnter);
+        btn.removeEventListener('focus', onFocus);
         btn.removeEventListener('blur', onLeave);
       });
     }
@@ -160,6 +164,33 @@ export class Overlay {
     it.btn.tabIndex = role !== 'hidden' ? 0 : -1;
     it.dirty = true;
     if (role === 'active' && prev !== 'active') it.revealed = false;
+  }
+
+  setReserve(r: { x0: number; x1: number; y0: number; y1: number }[]) {
+    this.reserve = r;
+  }
+
+  /** the nodes the keyboard can land on, and where each sits on screen (only those you can actually see) */
+  focusables(w: number, h: number): { id: string; x: number; y: number }[] {
+    const out: { id: string; x: number; y: number }[] = [];
+    for (const it of this.items.values()) {
+      if (it.role === 'hidden' || it.role === 'seed' || it.vis < 0.35 || it.el.style.visibility !== 'visible') continue;
+      if (it.x < 8 || it.x > w - 8 || it.y < 8 || it.y > h - 8) continue;
+      out.push({ id: it.node.id, x: it.x, y: it.y });
+    }
+    return out;
+  }
+
+  /** the node whose button holds keyboard focus right now, if any */
+  focusedId(): string | null {
+    const active = document.activeElement;
+    for (const it of this.items.values()) if (it.btn === active) return it.node.id;
+    return null;
+  }
+
+  /** move keyboard focus onto a node: its button shows the focus bloom and the node lights up as if hovered */
+  focus(id: string) {
+    this.items.get(id)?.btn.focus({ preventScroll: true });
   }
 
   /** last projected screen position of a node (px), or null while it is hidden */
@@ -287,6 +318,7 @@ export class Overlay {
       if (it.role === 'seed') continue;
       placed.push({ x0: x - 22, x1: x + 22, y0: y - 22, y1: y + 22, owner: it });
     }
+    for (const r of this.reserve) placed.push(r);
     const overlap = (r: Rect, self: Item) => {
       let a = 0;
       for (const p of placed) {
