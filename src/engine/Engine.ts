@@ -230,7 +230,7 @@ export class Engine {
     // the tier is a guess from the device, sharpened by what the GPU says it is
     this.quality = refineQuality(detectQuality(), this.renderer.getContext());
     this.profile = PROFILES[this.quality];
-    this.setLite(this.quality === 'low');
+    this.setLite(this.profile.lite);
     this.w = Math.max(1, host.clientWidth);
     this.h = Math.max(1, host.clientHeight);
     this.dpr = fitDpr(this.profile, this.w, this.h);
@@ -387,7 +387,7 @@ export class Engine {
     this.scene.add(this.orb.mesh);
     this.rings = new ShockRings(this.shared);
     this.scene.add(this.rings.group);
-    this.moments = new Moments(this.shared);
+    this.moments = new Moments(this.shared, this.profile.moments);
     this.scene.add(this.moments.group);
   }
 
@@ -401,7 +401,7 @@ export class Engine {
     const model = buildTree(this.categories, { ...DEFAULT_LAYOUT, squashX: sq.x, squashY: sq.y, ring: kind === 'portrait' ? 10.5 : DEFAULT_LAYOUT.ring, flare: kind === 'portrait' ? 0.3 : DEFAULT_LAYOUT.flare });
     const markers = new NodeMarkers(model.nodes, this.shared);
     this.scene.add(markers.mesh);
-    const leaves = new NodeLeaves(model.nodes, this.shared, { leaves: this.quality === 'low' ? 2 : 3, sway: !this.reduced });
+    const leaves = new NodeLeaves(model.nodes, this.shared, { leaves: this.profile.leaves, sway: !this.reduced });
     this.scene.add(leaves.mesh);
     const group = new THREE.Group();
     this.scene.add(group);
@@ -525,7 +525,8 @@ export class Engine {
     if (!p.bloom) return;
     try {
       const composer = new EffectComposer(this.renderer, {
-        frameBufferType: THREE.HalfFloatType,
+        // 8-bit buffers halve the memory and bandwidth of every post pass: what shared-memory graphics need
+        frameBufferType: p.hdr ? THREE.HalfFloatType : THREE.UnsignedByteType,
         multisampling: 0,
         depthBuffer: false,
         stencilBuffer: false,
@@ -537,7 +538,7 @@ export class Engine {
         luminanceSmoothing: 0.5,
         mipmapBlur: true,
         radius: 0.88,
-        levels: this.quality === 'low' ? 4 : this.quality === 'medium' ? 6 : 8,
+        levels: p.bloomLevels,
       });
       this.bloom = bloom;
       const effects: (BloomEffect | ChromaticAberrationEffect)[] = [bloom];
@@ -550,7 +551,10 @@ export class Engine {
           }),
         );
       }
-      composer.addPass(new EffectPass(this.rig.camera, ...effects));
+      const effectPass = new EffectPass(this.rig.camera, ...effects);
+      // dark soft gradients band visibly in 8 bits; a touch of noise hides it
+      effectPass.dithering = !p.hdr;
+      composer.addPass(effectPass);
       composer.setSize(this.w, this.h);
       this.composer = composer;
     } catch (e) {
@@ -871,7 +875,8 @@ export class Engine {
   private buildTwigs() {
     const w = this.world;
     if (w.foliage) return;
-    const low = this.quality === 'low';
+    // weaker tiers grow fewer leaves and blossoms (each one is an instance the GPU draws every frame)
+    const density = this.quality === 'min' ? 0.4 : this.profile.lite ? 0.6 : 1;
     const specs = [
       { t: 0.3, off: 0.95, len: 4.2, delay: 0.1 },
       { t: 0.5, off: 0.7, len: 3.5, delay: 0.25 },
@@ -890,7 +895,7 @@ export class Engine {
         const twig = this.fitTwig(`twig-${pi}-${k}`, f, base, sign, sp.off, sp.len, 0.7, p, 5);
         if (!twig) return;
         w.twigs.push({ rt, mesh: twig, fade: 0, delay: sp.delay, leaf: -1 });
-        if (!low && k < 2) forks.push({ rt, p, pi, k, len: sp.len, delay: sp.delay, twig });
+        if (this.profile.forks && k < 2) forks.push({ rt, p, pi, k, len: sp.len, delay: sp.delay, twig });
       });
     });
     for (const { rt, p, pi, k, len, delay, twig } of forks) {
@@ -912,9 +917,9 @@ export class Engine {
       t.leaf = sources.length;
       sources.push({ id: t.mesh.node.id, trunk: t.mesh.trunk, palette: t.mesh.node.palette });
     }
-    w.foliage = new Foliage(sources, this.shared, w.occ, { sway: !this.reduced, density: low ? 0.6 : 1 });
+    w.foliage = new Foliage(sources, this.shared, w.occ, { sway: !this.reduced, density });
     this.scene.add(w.foliage.mesh);
-    w.blossoms = new Blossoms(sources, this.shared, w.occ, { sway: !this.reduced, density: low ? 0.6 : 1 });
+    w.blossoms = new Blossoms(sources, this.shared, w.occ, { sway: !this.reduced, density });
     this.scene.add(w.blossoms.mesh);
   }
 
@@ -2326,7 +2331,7 @@ export class Engine {
     const p = this.perf;
     p.acc += sample;
     p.n++;
-    if (p.n < 90) return;
+    if (p.n < 60) return;
     const avg = p.acc / p.n;
     p.acc = 0;
     p.n = 0;
@@ -2334,12 +2339,14 @@ export class Engine {
       p.warm = false; // the first window holds shader compiles and the intro: not representative
       return;
     }
-    if (avg > 1 / 44) p.bad++;
+    // a window well under 28fps counts double, so a really weak GPU steps down every two seconds, not every four
+    if (avg > 1 / 28) p.bad += 2;
+    else if (avg > 1 / 44) p.bad++;
     else p.bad = Math.max(0, p.bad - 1);
     if (p.bad < 2) return;
     p.bad = 0;
     if (document.documentElement.dataset.q !== 'lite') this.setLite(true);
-    else if (this.dpr > 0.76) this.setDpr(Math.max(0.75, this.dpr - 0.2));
+    else if (this.dpr > 0.76) this.setDpr(Math.max(0.75, this.dpr - 0.25));
     else this.dropPost();
   }
 }
