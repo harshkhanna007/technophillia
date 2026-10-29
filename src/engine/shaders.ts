@@ -644,10 +644,17 @@ void main(){
     latCol += uLightCol[i] * l.w * g;
     fogCol += uLightCol[i] * l.w * f;
   }
+  // most of the screen is unlit: its result is below one 8-bit step, so skip the circuitry there entirely
+  if (L < 0.0006 && fogCol.r + fogCol.g + fogCol.b < 0.02) {
+    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+    #include <colorspace_fragment>
+    return;
+  }
   vec3 tint = L > 0.001 ? latCol / L : vec3(0.3, 0.4, 0.7);
   vec3 c1 = circuit(vWorld, 0.78, 0.0);
-  vec3 c2 = circuit(vWorld + 13.7, 0.27, 5.0);
   float deep = smoothstep(0.25, 1.1, L);
+  // the coarse second layer only shows deep inside a pool of light
+  vec3 c2 = deep > 0.0 ? circuit(vWorld + 13.7, 0.27, 5.0) : vec3(0.0);
   float pat = (c1.x * 0.55 + c1.y * 1.0 + c1.z * c1.x * 1.5) + 0.8 * deep * (c2.x * 0.45 + c2.y * 0.8 + c2.z * c2.x * 1.1);
   vec2 df = vWorld - uFocus;
   float focusFade = exp(-dot(df, df) / (28.0 * 28.0));

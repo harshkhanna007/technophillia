@@ -19,7 +19,7 @@ import { Rng } from './rng';
 import { Cursor } from './Cursor';
 import type { CursorTarget, PointerState } from './Cursor';
 import type { Framing } from './CameraRig';
-import { detectQuality, LOOK, PROFILES, SEED_SCALE } from './config';
+import { detectQuality, fitDpr, LOOK, PROFILES, refineQuality, SEED_SCALE } from './config';
 import type { Quality, QualityProfile } from './config';
 import { AmbientParticles, Background, EnergyOrb, NodeLeaves, NodeMarkers, Seed, ShockRings, Sparks } from './Fx';
 import { ancestry, buildTree, DEFAULT_LAYOUT, isDescendant } from './layout';
@@ -153,7 +153,7 @@ export class Engine {
   private activity = 0;
   private lastTime = 0;
   private sparkAcc = 0;
-  private perf = { acc: 0, n: 0, bad: 0 };
+  private perf = { acc: 0, n: 0, bad: 0, warm: true };
   private destroyed = false;
   private w = 1;
   private h = 1;
@@ -213,8 +213,6 @@ export class Engine {
 
   constructor(host: HTMLElement, private categories: CategoryData[]) {
     this.host = host;
-    this.quality = detectQuality();
-    this.profile = PROFILES[this.quality];
     this.reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.gctx = gsap.context(() => {});
     this.coarse = window.matchMedia('(pointer: coarse)').matches;
@@ -229,10 +227,14 @@ export class Engine {
       powerPreference: 'high-performance',
     });
     this.renderer.setClearColor(0x000000, 1);
-    this.dpr = Math.min(window.devicePixelRatio || 1, this.profile.dpr);
-    this.renderer.setPixelRatio(this.dpr);
+    // the tier is a guess from the device, sharpened by what the GPU says it is
+    this.quality = refineQuality(detectQuality(), this.renderer.getContext());
+    this.profile = PROFILES[this.quality];
+    this.setLite(this.quality === 'low');
     this.w = Math.max(1, host.clientWidth);
     this.h = Math.max(1, host.clientHeight);
+    this.dpr = fitDpr(this.profile, this.w, this.h);
+    this.renderer.setPixelRatio(this.dpr);
     this.renderer.setSize(this.w, this.h);
     const canvas = this.renderer.domElement;
     canvas.className = 'stage';
@@ -367,6 +369,7 @@ export class Engine {
     this.renderer.domElement.remove();
     this.audio.dispose();
     this.listeners.clear();
+    delete document.documentElement.dataset.q;
   }
 
   /* ─────────────────────────── construction ─────────────────────────── */
@@ -534,7 +537,7 @@ export class Engine {
         luminanceSmoothing: 0.5,
         mipmapBlur: true,
         radius: 0.88,
-        levels: this.quality === 'low' ? 5 : 8,
+        levels: this.quality === 'low' ? 4 : this.quality === 'medium' ? 6 : 8,
       });
       this.bloom = bloom;
       const effects: (BloomEffect | ChromaticAberrationEffect)[] = [bloom];
@@ -639,7 +642,11 @@ export class Engine {
     window.addEventListener('pointercancel', up, { passive: true });
     window.addEventListener('pointerover', over, { passive: true });
     document.documentElement.addEventListener('pointerleave', leave);
-    const vis = () => this.audio.setHidden(document.hidden);
+    const vis = () => {
+      this.audio.setHidden(document.hidden);
+      // a throttled background tab is not a slow GPU: start the frame-rate watch afresh when it comes back
+      this.perf = { acc: 0, n: 0, bad: 0, warm: true };
+    };
     document.addEventListener('visibilitychange', vis);
     this.cleanups.push(() => {
       window.removeEventListener('pointerdown', down);
@@ -2071,20 +2078,24 @@ export class Engine {
   private tick = () => {
     if (this.destroyed || this.contextLost) return;
     const now = performance.now();
-    const dt = Math.min(0.05, Math.max(0.0005, (now - this.lastTime) / 1000));
+    const raw = (now - this.lastTime) / 1000;
+    const dt = Math.min(0.05, Math.max(0.0005, raw));
     this.lastTime = now;
     this.skipAcc += dt;
     // battery: on non-flagship devices an idle scene renders every other frame (still 30fps)
+    let idle = false;
     if (this.quality !== 'high' && this.introDone && !this.busy && !this.ptr.down && now - this.lastInput > 2500) {
+      idle = true;
       this.skipFlip = !this.skipFlip;
       if (this.skipFlip) return;
     }
     const d = Math.min(0.066, this.skipAcc);
     this.skipAcc = 0;
-    this.frame(d);
+    // half-rate idle frames say nothing about how the GPU copes, so only real-time frames are measured
+    this.frame(d, idle ? 0 : raw);
   };
 
-  private frame(dt: number) {
+  private frame(dt: number, sample: number) {
     const sh = this.shared;
     sh.uTime.value += dt;
     const time = sh.uTime.value;
@@ -2240,7 +2251,7 @@ export class Engine {
     if (this.composer) this.composer.render(dt);
     else this.renderer.render(this.scene, cam);
 
-    this.monitor(dt);
+    this.monitor(sample);
   }
 
   private updateLights() {
@@ -2283,24 +2294,52 @@ export class Engine {
     bg.setLight(cap, this.ptrWorld.x, this.ptrWorld.y, 2.4, this.cursorLight, this.pointerColor());
   }
 
-  /** adaptive resolution: if we cannot hold ~45fps for a while, trade pixels for smoothness */
-  private monitor(dt: number) {
+  /** `lite` swaps the frosted-glass blur (re-done on the GPU every frame under a live canvas) for solid dark glass */
+  private setLite(on: boolean) {
+    document.documentElement.dataset.q = on ? 'lite' : this.quality;
+  }
+
+  private setDpr(v: number) {
+    this.dpr = v;
+    this.renderer.setPixelRatio(v);
+    if (this.composer) this.composer.setSize(this.w, this.h);
+    else this.renderer.setSize(this.w, this.h);
+    this.ambient.u.uPx.value = v;
+    this.sparks.setPixelRatio(v);
+  }
+
+  /** last resort: render the scene straight to the screen, without the bloom pass */
+  private dropPost() {
+    if (!this.composer) return;
+    this.composer.dispose();
+    this.composer = null;
+    this.bloom = null;
+    this.renderer.setSize(this.w, this.h);
+  }
+
+  /**
+   * adaptive quality: if we cannot hold ~45fps for a while, give up the cheapest-to-lose things first
+   * (glass blur, then pixels, then the bloom pass) until the frame rate holds
+   */
+  private monitor(sample: number) {
+    if (sample <= 0 || sample > 0.25 || document.hidden) return; // idle half-rate frames and tab switches say nothing about the GPU
     const p = this.perf;
-    p.acc += dt;
+    p.acc += sample;
     p.n++;
-    if (p.n < 120) return;
+    if (p.n < 90) return;
     const avg = p.acc / p.n;
     p.acc = 0;
     p.n = 0;
-    if (avg > 1 / 42) p.bad++;
-    else p.bad = Math.max(0, p.bad - 1);
-    if (p.bad >= 2 && this.dpr > 1) {
-      this.dpr = Math.max(1, this.dpr - 0.25);
-      this.renderer.setPixelRatio(this.dpr);
-      if (this.composer) this.composer.setSize(this.w, this.h);
-      else this.renderer.setSize(this.w, this.h);
-      this.ambient.u.uPx.value = this.dpr;
-      p.bad = 0;
+    if (p.warm) {
+      p.warm = false; // the first window holds shader compiles and the intro: not representative
+      return;
     }
+    if (avg > 1 / 44) p.bad++;
+    else p.bad = Math.max(0, p.bad - 1);
+    if (p.bad < 2) return;
+    p.bad = 0;
+    if (document.documentElement.dataset.q !== 'lite') this.setLite(true);
+    else if (this.dpr > 0.76) this.setDpr(Math.max(0.75, this.dpr - 0.2));
+    else this.dropPost();
   }
 }

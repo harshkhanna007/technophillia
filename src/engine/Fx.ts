@@ -361,6 +361,10 @@ export class Sparks {
     this.points.renderOrder = 6;
   }
 
+  setPixelRatio(v: number) {
+    this.mat.uniforms.uPx.value = v;
+  }
+
   /** radial / directional burst */
   burst(
     x: number,

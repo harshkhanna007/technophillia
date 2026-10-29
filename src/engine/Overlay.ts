@@ -226,11 +226,15 @@ export class Overlay {
       it.split = true;
     }
     const chars = it.title.querySelectorAll('.ch');
+    // weak devices skip the per-letter blur: every blurred letter is its own filtered layer
+    const lite = document.documentElement.dataset.q === 'lite';
     this.tweens.push(
       gsap.fromTo(
         chars,
-        { opacity: 0, y: 16, filter: 'blur(10px)' },
-        { opacity: 1, y: 0, filter: 'blur(0px)', duration: 0.95 / speed, ease: 'power3.out', stagger: { each: 0.028 / speed, from: 'start' }, overwrite: true },
+        lite ? { opacity: 0, y: 16 } : { opacity: 0, y: 16, filter: 'blur(10px)' },
+        lite
+          ? { opacity: 1, y: 0, duration: 0.95 / speed, ease: 'power3.out', stagger: { each: 0.028 / speed, from: 'start' }, overwrite: true }
+          : { opacity: 1, y: 0, filter: 'blur(0px)', duration: 0.95 / speed, ease: 'power3.out', stagger: { each: 0.028 / speed, from: 'start' }, overwrite: true },
       ),
       gsap.fromTo(it.title, { letterSpacing: '0.55em' }, { letterSpacing: '0.14em', duration: 1.9 / speed, ease: 'expo.out', overwrite: true }),
       gsap.fromTo(it.desc, { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 1.1 / speed, delay: 0.5 / speed, ease: 'power2.out', overwrite: true }),

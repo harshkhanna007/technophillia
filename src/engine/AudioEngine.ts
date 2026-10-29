@@ -94,11 +94,17 @@ export class AudioEngine {
     this.dry.connect(master);
     // generated reverb tail
     const conv = ctx.createConvolver();
-    const len = Math.floor(ctx.sampleRate * 2.4);
+    // built on the first tap, so it must be quick: the envelope is stepped every 64 samples (1ms, inaudible),
+    // and weak devices get a slightly shorter tail since convolution runs on the audio thread
+    const len = Math.floor(ctx.sampleRate * (document.documentElement.dataset.q === 'lite' ? 1.7 : 2.4));
     const ir = ctx.createBuffer(2, len, ctx.sampleRate);
     for (let c = 0; c < 2; c++) {
       const d = ir.getChannelData(c);
-      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 2.6);
+      let env = 1;
+      for (let i = 0; i < len; i++) {
+        if ((i & 63) === 0) env = Math.pow(1 - i / len, 2.6);
+        d[i] = (Math.random() * 2 - 1) * env;
+      }
     }
     conv.buffer = ir;
     this.wet = ctx.createGain();
