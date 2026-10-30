@@ -5,8 +5,8 @@
  */
 export const LOOK_PROFILE = {
   /** sharpest pixel ratio the canvas may reach, and the most pixels it may render at that ratio */
-  dprMax: 2,
-  budget: 5.0e6,
+  dprMax: 1.25,
+  budget: 1.9e6,
   /** the canvas never drops below this ratio, however slow the device */
   dprMin: 0.5,
   particles: 1200,
@@ -14,7 +14,7 @@ export const LOOK_PROFILE = {
   detail: 1,
   bgLights: 8,
   /** how many signature moments may play at once */
-  moments: 8,
+  moments: 4,
   /** leaves per node sprig */
   leaves: 3,
 } as const;

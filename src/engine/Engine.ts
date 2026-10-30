@@ -131,11 +131,8 @@ export class Engine {
   private dprMax: number;
   /** a pixel ratio this device was found unable to hold (Infinity until then) */
   private ceil = Infinity;
-  /** `?dpr=0.75` pins the resolution (testing); `?perf` shows a small live readout of frame rate and resolution */
+  /** `?dpr=0.75` pins the resolution (testing) */
   private pinned = false;
-  private perfEl: HTMLDivElement | null = null;
-  private perfN = 0;
-  private perfT = 0;
   private reduced: boolean;
   private audio = new AudioEngine();
   private gctx: gsap.Context;
@@ -248,7 +245,6 @@ export class Engine {
       this.dpr = this.dprMax = clamp(pin, 0.25, 3);
       this.pinned = true;
     }
-    if (qs.has('perf')) this.perfEl = this.makePerfEl();
     this.renderer.setPixelRatio(this.dpr);
     this.renderer.setSize(this.w, this.h);
     const canvas = this.renderer.domElement;
@@ -385,7 +381,6 @@ export class Engine {
     this.audio.dispose();
     this.listeners.clear();
     delete document.documentElement.dataset.q;
-    this.perfEl?.remove();
   }
 
   /* ─────────────────────────── construction ─────────────────────────── */
@@ -2360,7 +2355,6 @@ export class Engine {
     if (this.composer) this.composer.render(dt);
     else this.renderer.render(this.scene, cam);
 
-    this.perfTick(sample);
     this.monitor(sample);
   }
 
@@ -2402,30 +2396,6 @@ export class Engine {
     while (i < cap) bg.setLight(i++, 0, 0, 1, 0);
     // the pointer is a small lamp: it reveals the circuitry under it
     bg.setLight(cap, this.ptrWorld.x, this.ptrWorld.y, 2.4, this.cursorLight, this.pointerColor());
-  }
-
-  private makePerfEl() {
-    const el = document.createElement('div');
-    el.setAttribute('aria-hidden', 'true');
-    el.style.cssText = 'position:fixed;left:8px;top:8px;z-index:99;font:11px/1.4 ui-monospace,monospace;color:#9fe;background:rgba(0,0,0,.6);padding:4px 7px;border-radius:6px;pointer-events:none;white-space:pre';
-    document.body.appendChild(el);
-    return el;
-  }
-
-  /** the `?perf` readout: frames per second, the resolution being drawn, and what has been given up (if anything) */
-  private perfTick(sample: number) {
-    const el = this.perfEl;
-    if (!el || sample <= 0) return;
-    this.perfN++;
-    this.perfT += sample;
-    if (this.perfT < 0.5) return;
-    const fps = Math.round(this.perfN / this.perfT);
-    const c = this.renderer.domElement;
-    const lite = document.documentElement.dataset.q === 'lite';
-    el.textContent = `${fps} fps · ${c.width}×${c.height} · ${Math.round((this.dpr / (window.devicePixelRatio || 1)) * 100)}% of screen
-glass ${lite ? 'solid' : 'frosted'} · bloom ${this.composer ? 'on' : 'off'}${this.pinned ? ' · pinned' : ''}`;
-    this.perfN = 0;
-    this.perfT = 0;
   }
 
   /** `lite` swaps the frosted-glass blur (re-done on the GPU every frame under a live canvas) for solid dark glass */
