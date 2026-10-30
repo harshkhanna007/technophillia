@@ -235,10 +235,9 @@ export class Overlay {
     const words = it.title.querySelectorAll('.word');
     // the letters rise in one by one; the blur resolves once per word, because every blurred element is its own filtered
     // layer (dozens of them per title when it was per letter) and weak devices skip the blur entirely
-    const lite = document.documentElement.dataset.q === 'lite';
     this.tweens.push(
       gsap.fromTo(chars, { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.95 / speed, ease: 'power3.out', stagger: { each: 0.028 / speed, from: 'start' }, overwrite: true }),
-      ...(lite
+      ...(true
         ? []
         : [
             gsap.fromTo(
@@ -247,13 +246,12 @@ export class Overlay {
               { filter: 'blur(0px)', duration: 1.1 / speed, ease: 'power2.out', stagger: { each: 0.09 / speed, from: 'start' }, overwrite: true, clearProps: 'filter' },
             ),
           ]),
-      gsap.fromTo(it.title, { letterSpacing: '0.55em' }, { letterSpacing: '0.14em', duration: 1.9 / speed, ease: 'expo.out', overwrite: true }),
       gsap.fromTo(it.desc, { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 1.1 / speed, delay: 0.5 / speed, ease: 'power2.out', overwrite: true }),
     );
     it.revealed = true;
     this.layoutDirty = true;
     it.dirty = true;
-    it.measureUntil = performance.now() + 2600; // the title tracks in, so its box keeps changing
+    it.measureUntil = performance.now() + 300; // the title tracks in, so its box keeps changing
   }
 
   private measure(it: Item) {

@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import gsap from 'gsap';
 import {
   BloomEffect,
-  ChromaticAberrationEffect,
   EffectComposer,
   EffectPass,
   RenderPass,
@@ -110,6 +109,7 @@ interface EnergyJob {
   color: THREE.Color;
 }
 
+const WHITE = new THREE.Color('#ffffff');
 const SEED_LIGHT = new THREE.Color('#5fd0ff');
 const BLOOM_BASE = 1.7;
 /** the closer you zoom on a node, the wider the view must stay once more of the tree is open (see frameFor) */
@@ -550,15 +550,10 @@ export class Engine {
         luminanceSmoothing: 0.5,
         mipmapBlur: true,
         radius: 0.88,
-        levels: 8,
+        levels: 6,
       });
       this.bloom = bloom;
-      const chroma = new ChromaticAberrationEffect({
-        offset: new THREE.Vector2(0.0008, 0.001),
-        radialModulation: true,
-        modulationOffset: 0.3,
-      });
-      const effectPass = new EffectPass(this.rig.camera, bloom, chroma);
+      const effectPass = new EffectPass(this.rig.camera, bloom);
       effectPass.dithering = !hdr;
       composer.addPass(effectPass);
       this.composer = composer;
@@ -1394,13 +1389,13 @@ export class Engine {
     this.flareNode(node, 2.6);
     const fx = this.fx();
     this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.a, 7.2, 2.3);
-    if (fx > 0.6) {
+    if (fx > 2) {
       this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.accent, 4.2, 1.5);
       this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.b, 10.5, 3.0);
     }
     this.burstAt(node, 110, 6.4);
     this.flash(node.pos.x, node.pos.y, node.palette.a, 1.5, 11, 2.4);
-    if (fx > 0.5) this.bloomSurge(1.3);
+    if (fx > 2) this.bloomSurge(1.3);
     this.audio.impact();
     this.moments.fire(node, grown ? 1 : 0.6, this.reduced, finishing ? FINALE.scale : 1, finishing ? FINALE.stretch : 1);
     // the sound's many small voices are set up in a later task, so the frame that shows the node is not held up by them
@@ -2299,7 +2294,7 @@ export class Engine {
       orb.u.uPos.value.set(f.x, f.y, f.z + 0.05);
       const dir = job.mode === 'retract' ? -1 : 1;
       orb.u.uDir.value.set(f.tx * dir, f.ty * dir);
-      (orb.u.uColor.value as THREE.Color).copy(job.color).lerp(new THREE.Color('#ffffff'), 0.25);
+      (orb.u.uColor.value as THREE.Color).copy(job.color).lerp(WHITE, 0.25);
       const live = job.mode === 'grow' ? job.t < 1.0 : job.mode === 'pulse' ? job.t < 1.02 && job.t > -0.04 : job.t > 0.015;
       orbTarget = live ? 1 : 0;
       this.rig.follow.set(f.x, f.y, 0);
