@@ -8,7 +8,7 @@ import {
   RenderPass,
 } from 'postprocessing';
 import { BranchMesh } from './BranchMesh';
-import type { AnyUniform, Shared } from './BranchMesh';
+import type { Shared } from './BranchMesh';
 import { AudioEngine } from './AudioEngine';
 import { CameraRig } from './CameraRig';
 import { Occupancy } from './clearance';
@@ -19,8 +19,7 @@ import { Rng } from './rng';
 import { Cursor } from './Cursor';
 import type { CursorTarget, PointerState } from './Cursor';
 import type { Framing } from './CameraRig';
-import { detectQuality, fitDpr, LOOK, PROFILES, refineQuality, SEED_SCALE } from './config';
-import type { Quality, QualityProfile } from './config';
+import { LOOK, LOOK_PROFILE, maxDpr, SEED_SCALE } from './config';
 import { AmbientParticles, Background, EnergyOrb, NodeLeaves, NodeMarkers, Seed, ShockRings, Sparks } from './Fx';
 import { ancestry, buildTree, DEFAULT_LAYOUT, isDescendant } from './layout';
 import type { TreeModel } from './layout';
@@ -126,9 +125,17 @@ export class Engine {
   private scene = new THREE.Scene();
   private rig: CameraRig;
   private shared: Shared;
-  private quality: Quality;
-  private profile: QualityProfile;
+  private profile = LOOK_PROFILE;
+  /** the canvas pixel ratio right now, and the sharpest this screen may reach (see monitor) */
   private dpr: number;
+  private dprMax: number;
+  /** a pixel ratio this device was found unable to hold (Infinity until then) */
+  private ceil = Infinity;
+  /** `?dpr=0.75` pins the resolution (testing); `?perf` shows a small live readout of frame rate and resolution */
+  private pinned = false;
+  private perfEl: HTMLDivElement | null = null;
+  private perfN = 0;
+  private perfT = 0;
   private reduced: boolean;
   private audio = new AudioEngine();
   private gctx: gsap.Context;
@@ -153,7 +160,7 @@ export class Engine {
   private activity = 0;
   private lastTime = 0;
   private sparkAcc = 0;
-  private perf = { acc: 0, n: 0, bad: 0, warm: true };
+  private drs = newDrs();
   private destroyed = false;
   private w = 1;
   private h = 1;
@@ -227,13 +234,18 @@ export class Engine {
       powerPreference: 'high-performance',
     });
     this.renderer.setClearColor(0x000000, 1);
-    // the tier is a guess from the device, sharpened by what the GPU says it is
-    this.quality = refineQuality(detectQuality(), this.renderer.getContext());
-    this.profile = PROFILES[this.quality];
-    this.setLite(this.profile.lite);
     this.w = Math.max(1, host.clientWidth);
     this.h = Math.max(1, host.clientHeight);
-    this.dpr = fitDpr(this.profile, this.w, this.h);
+    // every device gets the same picture; only its sharpness is negotiated. Start modest and sharpen while the frame rate holds.
+    this.dprMax = maxDpr(this.w, this.h);
+    this.dpr = Math.min(this.dprMax, 1);
+    const qs = new URLSearchParams(window.location.search);
+    const pin = Number(qs.get('dpr'));
+    if (pin > 0) {
+      this.dpr = this.dprMax = clamp(pin, 0.25, 3);
+      this.pinned = true;
+    }
+    if (qs.has('perf')) this.perfEl = this.makePerfEl();
     this.renderer.setPixelRatio(this.dpr);
     this.renderer.setSize(this.w, this.h);
     const canvas = this.renderer.domElement;
@@ -370,6 +382,7 @@ export class Engine {
     this.audio.dispose();
     this.listeners.clear();
     delete document.documentElement.dataset.q;
+    this.perfEl?.remove();
   }
 
   /* ─────────────────────────── construction ─────────────────────────── */
@@ -377,7 +390,7 @@ export class Engine {
     const root = new THREE.Color('#37d8ff');
     this.bg = new Background(this.shared, this.profile.bgLights);
     this.scene.add(this.bg.mesh);
-    this.ambient = new AmbientParticles(this.shared, this.profile.particles, this.dpr, this.bg.u as { uLights: AnyUniform; uLightCol: AnyUniform }, this.profile.bgLights);
+    this.ambient = new AmbientParticles(this.shared, this.profile.particles, this.dpr, this.bg.lightU, this.profile.bgLights);
     this.scene.add(this.ambient.points);
     this.seed = new Seed(this.shared, root, new THREE.Color('#7b5cff'), new THREE.Color('#ffffff'));
     this.scene.add(this.seed.mesh);
@@ -521,12 +534,12 @@ export class Engine {
   }
 
   private setupPost() {
-    const p = this.profile;
-    if (!p.bloom) return;
     try {
+      // the picture is built in half-float so bright glows keep their colour; a GPU that cannot render to half-float
+      // gets 8-bit buffers with dithering, which looks the same once it is on screen
+      const hdr = this.renderer.extensions.has('EXT_color_buffer_half_float') || this.renderer.extensions.has('EXT_color_buffer_float');
       const composer = new EffectComposer(this.renderer, {
-        // 8-bit buffers halve the memory and bandwidth of every post pass: what shared-memory graphics need
-        frameBufferType: p.hdr ? THREE.HalfFloatType : THREE.UnsignedByteType,
+        frameBufferType: hdr ? THREE.HalfFloatType : THREE.UnsignedByteType,
         multisampling: 0,
         depthBuffer: false,
         stencilBuffer: false,
@@ -538,29 +551,32 @@ export class Engine {
         luminanceSmoothing: 0.5,
         mipmapBlur: true,
         radius: 0.88,
-        levels: p.bloomLevels,
+        levels: 8,
       });
       this.bloom = bloom;
-      const effects: (BloomEffect | ChromaticAberrationEffect)[] = [bloom];
-      if (p.chroma) {
-        effects.push(
-          new ChromaticAberrationEffect({
-            offset: new THREE.Vector2(0.0008, 0.001),
-            radialModulation: true,
-            modulationOffset: 0.3,
-          }),
-        );
-      }
-      const effectPass = new EffectPass(this.rig.camera, ...effects);
-      // dark soft gradients band visibly in 8 bits; a touch of noise hides it
-      effectPass.dithering = !p.hdr;
+      const chroma = new ChromaticAberrationEffect({
+        offset: new THREE.Vector2(0.0008, 0.001),
+        radialModulation: true,
+        modulationOffset: 0.3,
+      });
+      const effectPass = new EffectPass(this.rig.camera, bloom, chroma);
+      effectPass.dithering = !hdr;
       composer.addPass(effectPass);
-      composer.setSize(this.w, this.h);
       this.composer = composer;
+      this.sizePost();
     } catch (e) {
       console.warn('[technophilia] post-processing unavailable, rendering directly', e);
       this.composer = null;
     }
+  }
+
+  /** the canvas changed size: resize the post buffers, and keep the bloom's pyramid no deeper than the picture is wide */
+  private sizePost() {
+    const c = this.composer;
+    if (!c) return;
+    c.setSize(this.w, this.h);
+    const levels = clamp(Math.floor(Math.log2(Math.min(this.w, this.h) * this.dpr)) - 1, 4, 8);
+    if (this.bloom && this.bloom.mipmapBlurPass.levels !== levels) this.bloom.mipmapBlurPass.levels = levels;
   }
 
   private bindEvents() {
@@ -649,7 +665,7 @@ export class Engine {
     const vis = () => {
       this.audio.setHidden(document.hidden);
       // a throttled background tab is not a slow GPU: start the frame-rate watch afresh when it comes back
-      this.perf = { acc: 0, n: 0, bad: 0, warm: true };
+      this.drs = newDrs(this.drs);
     };
     document.addEventListener('visibilitychange', vis);
     this.cleanups.push(() => {
@@ -721,7 +737,10 @@ export class Engine {
     if (w === this.w && h === this.h) return;
     this.w = w;
     this.h = h;
-    if (this.composer) this.composer.setSize(w, h);
+    // a bigger window may not fit the pixel budget at the current ratio
+    this.dprMax = Math.min(maxDpr(w, h), this.ceil);
+    if (this.dpr > this.dprMax) this.setDpr(this.dprMax);
+    if (this.composer) this.sizePost();
     else this.renderer.setSize(w, h);
     this.rig.setAspect(w / h);
     const kind = this.layoutKind();
@@ -875,8 +894,6 @@ export class Engine {
   private buildTwigs() {
     const w = this.world;
     if (w.foliage) return;
-    // weaker tiers grow fewer leaves and blossoms (each one is an instance the GPU draws every frame)
-    const density = this.quality === 'min' ? 0.4 : this.profile.lite ? 0.6 : 1;
     const specs = [
       { t: 0.3, off: 0.95, len: 4.2, delay: 0.1 },
       { t: 0.5, off: 0.7, len: 3.5, delay: 0.25 },
@@ -895,7 +912,7 @@ export class Engine {
         const twig = this.fitTwig(`twig-${pi}-${k}`, f, base, sign, sp.off, sp.len, 0.7, p, 5);
         if (!twig) return;
         w.twigs.push({ rt, mesh: twig, fade: 0, delay: sp.delay, leaf: -1 });
-        if (this.profile.forks && k < 2) forks.push({ rt, p, pi, k, len: sp.len, delay: sp.delay, twig });
+        if (k < 2) forks.push({ rt, p, pi, k, len: sp.len, delay: sp.delay, twig });
       });
     });
     for (const { rt, p, pi, k, len, delay, twig } of forks) {
@@ -917,9 +934,9 @@ export class Engine {
       t.leaf = sources.length;
       sources.push({ id: t.mesh.node.id, trunk: t.mesh.trunk, palette: t.mesh.node.palette });
     }
-    w.foliage = new Foliage(sources, this.shared, w.occ, { sway: !this.reduced, density });
+    w.foliage = new Foliage(sources, this.shared, w.occ, { sway: !this.reduced, density: 1 });
     this.scene.add(w.foliage.mesh);
-    w.blossoms = new Blossoms(sources, this.shared, w.occ, { sway: !this.reduced, density });
+    w.blossoms = new Blossoms(sources, this.shared, w.occ, { sway: !this.reduced, density: 1 });
     this.scene.add(w.blossoms.mesh);
   }
 
@@ -1841,8 +1858,53 @@ export class Engine {
       gsap.delayedCall(2.4 * sp, () => {
         this.ready = true;
         this.emit();
+        this.warmUp();
       });
     });
+  }
+
+  /**
+   * Compile every shader the scene will ever use, including those of things not on show yet (rings, moments, branches).
+   * A shader built for the screen is not the one used inside the post-processing buffers, so compile against those.
+   */
+  private compileAll() {
+    const r = this.renderer;
+    const prev = r.getRenderTarget();
+    r.setRenderTarget(this.composer ? this.composer.inputBuffer : null);
+    void r.compileAsync(this.scene, this.rig.camera);
+    r.setRenderTarget(prev);
+  }
+
+  /**
+   * While the seed waits to be clicked the device is idle, so the first-time work happens now, one small step
+   * at a time: the stem and the six boughs build their circuitry, the twigs and leaves grow, and every shader
+   * is compiled. Otherwise each of those lands as a stutter right when the tree starts to move.
+   */
+  private warmUp() {
+    const w = this.world;
+    const steps: (() => void)[] = [
+      () => w.stem.ensureDetail(this.profile.detail),
+      () => this.buildTwigs(),
+      ...w.model.primaries.map((n) => () => {
+        const rt = w.rts.get(n.id);
+        if (rt) this.branchFor(rt).ensureDetail(this.profile.detail);
+      }),
+      () => this.compileAll(),
+    ];
+    const later = (fn: () => void) => {
+      const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
+      if (ric) ric(fn, { timeout: 400 });
+      else window.setTimeout(fn, 80);
+    };
+    const next = () => {
+      // a rebuilt world (the window changed shape) or a click that already built things ends the warm-up
+      if (this.destroyed || this.world !== w || this.started) return;
+      const step = steps.shift();
+      if (!step) return;
+      step();
+      later(next);
+    };
+    later(next);
   }
 
   /** the click: the seed cracks, a shoot climbs out, the stem rises to its crown, then the six buds open */
@@ -2089,7 +2151,7 @@ export class Engine {
     this.skipAcc += dt;
     // battery: on non-flagship devices an idle scene renders every other frame (still 30fps)
     let idle = false;
-    if (this.quality !== 'high' && this.introDone && !this.busy && !this.ptr.down && now - this.lastInput > 2500) {
+    if (this.introDone && !this.busy && !this.ptr.down && now - this.lastInput > 2500) {
       idle = true;
       this.skipFlip = !this.skipFlip;
       if (this.skipFlip) return;
@@ -2248,6 +2310,7 @@ export class Engine {
     (this.bg.u.uFocus.value as THREE.Vector2).set(this.rig.focus.x, this.rig.focus.y);
     (this.ambient.u.uCenter.value as THREE.Vector3).set(this.rig.focus.x, this.rig.focus.y, 0);
     this.updateLights();
+    this.bg.renderField(this.renderer, cam);
 
     // ── dom
     w.overlay.update(cam, this.w, this.h);
@@ -2256,6 +2319,7 @@ export class Engine {
     if (this.composer) this.composer.render(dt);
     else this.renderer.render(this.scene, cam);
 
+    this.perfTick(sample);
     this.monitor(sample);
   }
 
@@ -2299,18 +2363,44 @@ export class Engine {
     bg.setLight(cap, this.ptrWorld.x, this.ptrWorld.y, 2.4, this.cursorLight, this.pointerColor());
   }
 
+  private makePerfEl() {
+    const el = document.createElement('div');
+    el.setAttribute('aria-hidden', 'true');
+    el.style.cssText = 'position:fixed;left:8px;top:8px;z-index:99;font:11px/1.4 ui-monospace,monospace;color:#9fe;background:rgba(0,0,0,.6);padding:4px 7px;border-radius:6px;pointer-events:none;white-space:pre';
+    document.body.appendChild(el);
+    return el;
+  }
+
+  /** the `?perf` readout: frames per second, the resolution being drawn, and what has been given up (if anything) */
+  private perfTick(sample: number) {
+    const el = this.perfEl;
+    if (!el || sample <= 0) return;
+    this.perfN++;
+    this.perfT += sample;
+    if (this.perfT < 0.5) return;
+    const fps = Math.round(this.perfN / this.perfT);
+    const c = this.renderer.domElement;
+    const lite = document.documentElement.dataset.q === 'lite';
+    el.textContent = `${fps} fps · ${c.width}×${c.height} · ${Math.round((this.dpr / (window.devicePixelRatio || 1)) * 100)}% of screen
+glass ${lite ? 'solid' : 'frosted'} · bloom ${this.composer ? 'on' : 'off'}${this.pinned ? ' · pinned' : ''}`;
+    this.perfN = 0;
+    this.perfT = 0;
+  }
+
   /** `lite` swaps the frosted-glass blur (re-done on the GPU every frame under a live canvas) for solid dark glass */
   private setLite(on: boolean) {
-    document.documentElement.dataset.q = on ? 'lite' : this.quality;
+    if (on) document.documentElement.dataset.q = 'lite';
+    else delete document.documentElement.dataset.q;
   }
 
   private setDpr(v: number) {
     this.dpr = v;
     this.renderer.setPixelRatio(v);
-    if (this.composer) this.composer.setSize(this.w, this.h);
+    if (this.composer) this.sizePost();
     else this.renderer.setSize(this.w, this.h);
     this.ambient.u.uPx.value = v;
     this.sparks.setPixelRatio(v);
+    this.drs.settle = SETTLE;
   }
 
   /** last resort: render the scene straight to the screen, without the bloom pass */
@@ -2323,30 +2413,122 @@ export class Engine {
   }
 
   /**
-   * adaptive quality: if we cannot hold ~45fps for a while, give up the cheapest-to-lose things first
-   * (glass blur, then pixels, then the bloom pass) until the frame rate holds
+   * Dynamic resolution. The picture is always the full one; this only chooses how many pixels it is drawn at.
+   * It starts modest and sharpens while the frame rate holds, steps down in proportion when it does not, and
+   * remembers a step that failed. When the picture is already well under full sharpness it gives up the glass
+   * blur, and only if the lowest resolution still lags does it thin the dust and, last of all, drop the bloom pass.
    */
   private monitor(sample: number) {
-    if (sample <= 0 || sample > 0.25 || document.hidden) return; // idle half-rate frames and tab switches say nothing about the GPU
-    const p = this.perf;
-    p.acc += sample;
-    p.n++;
-    if (p.n < 60) return;
-    const avg = p.acc / p.n;
-    p.acc = 0;
-    p.n = 0;
-    if (p.warm) {
-      p.warm = false; // the first window holds shader compiles and the intro: not representative
+    // idle half-rate frames, hitches and background tabs say nothing about how the device copes
+    if (sample <= 0 || sample > 0.25 || document.hidden || this.pinned) return;
+    const d = this.drs;
+    if (d.settle > 0) {
+      d.settle--;
       return;
     }
-    // a window well under 28fps counts double, so a really weak GPU steps down every two seconds, not every four
-    if (avg > 1 / 28) p.bad += 2;
-    else if (avg > 1 / 44) p.bad++;
-    else p.bad = Math.max(0, p.bad - 1);
-    if (p.bad < 2) return;
-    p.bad = 0;
-    if (document.documentElement.dataset.q !== 'lite') this.setLite(true);
-    else if (this.dpr > 0.76) this.setDpr(Math.max(0.75, this.dpr - 0.25));
-    else this.dropPost();
+    const now = performance.now();
+    if (d.n === 0) d.t0 = now;
+    d.buf[d.n++] = sample * 1000;
+    // a window is 45 frames, or about a second when the frames are slow, so a struggling device reacts quickly
+    if (d.n < WINDOW && !(d.n >= 6 && now - d.t0 > 900)) return;
+    const count = d.n;
+    d.n = 0;
+    const win = d.buf.slice(0, count).sort((a, b) => a - b);
+    const avg = win.reduce((a, b) => a + b, 0) / count;
+    if (d.warm) {
+      d.warm = false; // the first window holds shader compiles and the intro: not representative
+      return;
+    }
+    // the display's own cadence: what a window that kept up looks like (60Hz unless the frames prove faster)
+    if (avg < 18.3) d.period = clamp(win[count >> 1], 6.9, 17.5);
+    const period = d.period;
+    const bad = avg > period * 1.25;
+    const good = avg < period * 1.12;
+    if (d.hold > 0) d.hold--;
+
+    if (bad) {
+      d.badRun++;
+      // a sharpening step that did not hold: go back, and wait longer before trying again
+      if (d.probe > 0 && this.dpr > d.probe) {
+        const back = d.probe;
+        d.fails++;
+        d.hold = d.holdNext;
+        d.holdNext = Math.min(d.holdNext * 2, 48);
+        if (d.fails >= 2) {
+          // twice is a verdict: this is the sharpest it can do
+          this.ceil = back;
+          this.dprMax = Math.min(this.dprMax, back);
+        }
+        d.probe = 0;
+        this.setDpr(back);
+        return;
+      }
+      d.probe = 0;
+      if (this.dpr <= 0.8 && document.documentElement.dataset.q !== 'lite') {
+        // already well below full sharpness: the blur under the cards is the next thing to go, before the picture loses more
+        this.setLite(true);
+        d.settle = SETTLE;
+        d.badRun = 0;
+      } else if (this.dpr > LOOK_PROFILE.dprMin + 0.01) {
+        const k = clamp(Math.sqrt((period * 1.02) / avg), 0.55, 0.92);
+        this.setDpr(Math.max(LOOK_PROFILE.dprMin, Math.round(this.dpr * k * 20) / 20));
+        d.badRun = 0;
+      } else if (d.badRun >= 2) {
+        // the lowest resolution still lags: give up the next cheapest thing
+        d.badRun = 0;
+        d.rung++;
+        if (d.rung === 1) this.ambient.points.geometry.setDrawRange(0, this.profile.particles >> 1);
+        else this.dropPost();
+        d.settle = SETTLE;
+      }
+      return;
+    }
+    d.badRun = 0;
+    d.probe = 0;
+    if (good && d.rung === 0 && d.hold === 0 && this.dpr < this.dprMax - 0.01) {
+      d.probe = this.dpr;
+      this.setDpr(Math.min(this.dprMax, Math.round((this.dpr + 0.25) * 20) / 20));
+    }
   }
+}
+
+/** frames per measuring window, and frames ignored after the canvas changes size (its buffers are being rebuilt) */
+const WINDOW = 45;
+const SETTLE = 6;
+
+function newDrs(prev?: Drs): Drs {
+  return {
+    buf: new Array<number>(WINDOW).fill(0),
+    n: 0,
+    t0: 0,
+    warm: true,
+    settle: 0,
+    period: prev?.period ?? 16.7,
+    probe: prev?.probe ?? 0,
+    hold: prev?.hold ?? 0,
+    holdNext: prev?.holdNext ?? 6,
+    fails: prev?.fails ?? 0,
+    badRun: 0,
+    rung: prev?.rung ?? 0,
+  };
+}
+
+interface Drs {
+  buf: number[];
+  n: number;
+  /** when the current window began */
+  t0: number;
+  warm: boolean;
+  settle: number;
+  /** frame interval of the display, in ms */
+  period: number;
+  /** the pixel ratio before the last sharpening step, while that step is on trial (0 = none) */
+  probe: number;
+  /** windows to wait before sharpening again, and how long the next wait is */
+  hold: number;
+  holdNext: number;
+  fails: number;
+  badRun: number;
+  /** how many extras have been given up at the lowest resolution */
+  rung: number;
 }

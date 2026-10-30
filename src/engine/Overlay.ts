@@ -49,6 +49,8 @@ interface Candidate {
 }
 
 const hex = (c: THREE.Color) => '#' + c.getHexString(THREE.SRGBColorSpace);
+/** label placement is re-solved this often (ms); labels still follow their nodes every frame */
+const LAYOUT_MS = 50;
 const OBST_CAP = 5200; // projected obstacle points per frame (x,y pairs)
 
 /**
@@ -70,6 +72,8 @@ export class Overlay {
   private obst = new Float32Array(OBST_CAP);
   private obstN = 0;
   private lastW = 0;
+  private lastLayout = 0;
+  private layoutDirty = true;
   /** screen areas the HUD has claimed (the reveal card, a finale caption): labels treat them like other labels and keep clear */
   private reserve: Rect[] = [];
 
@@ -160,6 +164,7 @@ export class Overlay {
     if (!it || it.role === role) return;
     const prev = it.role;
     it.role = role;
+    this.layoutDirty = true;
     it.el.dataset.role = role;
     it.btn.tabIndex = role !== 'hidden' ? 0 : -1;
     it.dirty = true;
@@ -168,6 +173,7 @@ export class Overlay {
 
   setReserve(r: { x0: number; x1: number; y0: number; y1: number }[]) {
     this.reserve = r;
+    this.layoutDirty = true;
   }
 
   /** the nodes the keyboard can land on, and where each sits on screen (only those you can actually see) */
@@ -240,6 +246,7 @@ export class Overlay {
       gsap.fromTo(it.desc, { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 1.1 / speed, delay: 0.5 / speed, ease: 'power2.out', overwrite: true }),
     );
     it.revealed = true;
+    this.layoutDirty = true;
     it.dirty = true;
     it.measureUntil = performance.now() + 2600; // the title tracks in, so its box keeps changing
   }
@@ -256,7 +263,14 @@ export class Overlay {
     const now = performance.now();
     if (w !== this.lastW) {
       this.lastW = w;
+      this.layoutDirty = true;
       for (const it of this.items.values()) it.dirty = true;
+    }
+    // the costly part (scoring every label spot against every strand) runs ~20 times a second; moving labels runs every frame
+    const layoutNow = this.layoutDirty || now - this.lastLayout >= LAYOUT_MS;
+    if (layoutNow) {
+      this.layoutDirty = false;
+      this.lastLayout = now;
     }
 
     // ── project nodes
@@ -284,8 +298,9 @@ export class Overlay {
       it.el.style.transform = `translate3d(${x.toFixed(1)}px,${y.toFixed(1)}px,0)`;
       it.el.style.opacity = it.vis.toFixed(3);
       const prio = it.role === 'active' ? 0 : it.role === 'trail' ? 1 : it.role === 'seed' ? 9 : it.role === 'dormant' ? 3 : 2;
-      live.push({ it, x, y, prio });
+      if (layoutNow) live.push({ it, x, y, prio });
     }
+    if (!layoutNow) return;
 
     // ── project strand samples (obstacles)
     let on = 0;

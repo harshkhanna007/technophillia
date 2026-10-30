@@ -62,9 +62,13 @@ src/engine/
 src/components/         thin React shell (HUD only – zero per-frame React work)
 ```
 
-Rendering notes: ~36 draw calls with all six primaries open, <0.5 ms CPU per frame. Quality tiers
-(`src/engine/config.ts`) lower DPR / bloom / particles / circuit density on phones, and an adaptive
-monitor drops resolution if the frame rate sags. `prefers-reduced-motion` disables camera sway and
+Rendering notes: ~36 draw calls with all six primaries open. There is one look for every device, with no
+quality tiers: the whole scene (all lights, leaves, sparks and the full bloom) is always drawn. What adapts is
+resolution only: the engine starts at 1x, sharpens while the frame rate holds, and steps down in proportion
+when it does not (`Engine.monitor`, floor 0.5x), giving up the glass blur and then the dust and bloom only if
+the lowest resolution still lags. The background light pools are computed on a small grid and read back by
+the background shader, label placement is solved ~20 times a second, and every shader is compiled while the
+seed waits, so nothing stalls when the tree starts to move. `prefers-reduced-motion` disables camera sway and
 parallax and shortens the timelines. On portrait screens the tree narrows and stretches taller, and
 labels simplify (only the current node's children are labelled).
 

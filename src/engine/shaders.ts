@@ -587,20 +587,70 @@ void main(){
 /* ───────────────────────── background: pure black, light fog, circuitry revealed by light ───────────────────────── */
 export const BG_VERT = /* glsl */ `
 varying vec2 vWorld;
+varying vec3 vClip;
 void main(){
   vec4 w = modelMatrix * vec4(position, 1.0);
   vWorld = w.xy;
   gl_Position = projectionMatrix * viewMatrix * w;
+  vClip = gl_Position.xyw;
+}
+`;
+
+/**
+ * The light pools are smooth gaussians, so they are worked out once per cell of a small grid (a few
+ * thousand cells) instead of once per pixel (a million). The background shader reads them back with one
+ * texture fetch. Mode 0 writes the lit colour and total light, mode 1 the haze.
+ */
+export const FIELD_VERT = /* glsl */ `
+varying vec2 vUv;
+void main(){
+  vUv = position.xy * 0.5 + 0.5;
+  gl_Position = vec4(position.xy, 0.0, 1.0);
+}
+`;
+
+export const FIELD_FRAG = /* glsl */ `
+uniform vec4 uLights[8];
+uniform vec3 uLightCol[8];
+uniform mat4 uInvViewProj;
+uniform float uPlaneZ;
+uniform float uMode;
+varying vec2 vUv;
+void main(){
+  // the point of the background plane that this cell of the screen looks at
+  vec4 n = uInvViewProj * vec4(vUv * 2.0 - 1.0, -1.0, 1.0);
+  vec4 f = uInvViewProj * vec4(vUv * 2.0 - 1.0, 1.0, 1.0);
+  vec3 a = n.xyz / n.w;
+  vec3 b = f.xyz / f.w;
+  vec2 world = (a + (b - a) * ((uPlaneZ - a.z) / (b.z - a.z))).xy;
+  float L = 0.0;
+  vec3 lat = vec3(0.0);
+  vec3 fog = vec3(0.0);
+  for (int i = 0; i < LIGHTS; i++) {
+    vec4 l = uLights[i];
+    if (l.w < 0.0005) continue;
+    vec2 dd = world - l.xy;
+    float d2 = dot(dd, dd);
+    float r2 = l.z * l.z;
+    if (d2 > r2 * 24.0) continue;
+    float g = exp(-d2 / r2);
+    float fg = exp(-d2 / (r2 * 2.4));
+    L += l.w * g;
+    lat += uLightCol[i] * l.w * g;
+    fog += uLightCol[i] * l.w * fg;
+  }
+  gl_FragColor = uMode < 0.5 ? vec4(lat, L) : vec4(fog, 0.0);
 }
 `;
 
 export const BG_FRAG = /* glsl */ `
 uniform float uTime;
-uniform vec4 uLights[8];
-uniform vec3 uLightCol[8];
 uniform vec2 uFocus;
 uniform float uReveal;
+uniform sampler2D uFieldA;
+uniform sampler2D uFieldB;
 varying vec2 vWorld;
+varying vec3 vClip;
 ${GLSL_COMMON}
 float seg(vec2 p, vec2 a, vec2 b){
   vec2 pa = p - a;
@@ -631,19 +681,11 @@ vec3 circuit(vec2 p, float scale, float salt){
   return vec3(line, node, flow);
 }
 void main(){
-  float L = 0.0;
-  vec3 fogCol = vec3(0.0);
-  vec3 latCol = vec3(0.0);
-  for (int i = 0; i < LIGHTS; i++) {
-    vec4 l = uLights[i];
-    vec2 dd = vWorld - l.xy;
-    float d2 = dot(dd, dd);
-    float g = exp(-d2 / (l.z * l.z));
-    float f = exp(-d2 / (l.z * l.z * 2.4));
-    L += l.w * g;
-    latCol += uLightCol[i] * l.w * g;
-    fogCol += uLightCol[i] * l.w * f;
-  }
+  vec2 suv = vClip.xy / vClip.z * 0.5 + 0.5;
+  vec4 fa = texture2D(uFieldA, suv);
+  vec3 latCol = fa.rgb;
+  float L = fa.a;
+  vec3 fogCol = texture2D(uFieldB, suv).rgb;
   // most of the screen is unlit: its result is below one 8-bit step, so skip the circuitry there entirely
   if (L < 0.0006 && fogCol.r + fogCol.g + fogCol.b < 0.02) {
     gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);

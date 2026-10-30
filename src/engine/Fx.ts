@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import {
   BG_FRAG,
   BG_VERT,
+  FIELD_FRAG,
+  FIELD_VERT,
   LEAF_FRAG,
   LEAF_VERT,
   MARKER_FRAG,
@@ -233,6 +235,10 @@ export class Seed {
 }
 
 /* ───────────────────────── reactive PCB background ───────────────────────── */
+const BG_Z = -6.5;
+/** cells of the light grid: smooth gaussians, so a few thousand cells carry what a million pixels would */
+const FIELD_W = 160;
+const FIELD_H = 96;
 export class Background {
   readonly mesh: THREE.Mesh;
   readonly u: Record<string, AnyUniform>;
@@ -240,17 +246,57 @@ export class Background {
   private geo: THREE.PlaneGeometry;
   readonly lights: THREE.Vector4[];
   readonly lightCols: THREE.Color[];
+  /** the same light arrays as shared uniforms, for the dust that also catches the light */
+  readonly lightU: { uLights: AnyUniform; uLightCol: AnyUniform };
+  /** the light pools, worked out on a small grid (see FIELD_FRAG) and read back by the background */
+  private fieldA: THREE.WebGLRenderTarget;
+  private fieldB: THREE.WebGLRenderTarget;
+  private fieldMat: THREE.ShaderMaterial;
+  private fieldMesh: THREE.Mesh;
+  private fieldScene = new THREE.Scene();
+  private fieldCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  private invViewProj = new THREE.Matrix4();
 
   constructor(shared: Shared, lightCount: number) {
     this.lights = Array.from({ length: 8 }, () => new THREE.Vector4(0, 0, 4, 0));
     this.lightCols = Array.from({ length: 8 }, () => new THREE.Color(0.3, 0.5, 1));
+    const mk = () =>
+      new THREE.WebGLRenderTarget(FIELD_W, FIELD_H, {
+        type: THREE.HalfFloatType,
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        depthBuffer: false,
+        stencilBuffer: false,
+        generateMipmaps: false,
+      });
+    this.lightU = { uLights: { value: this.lights }, uLightCol: { value: this.lightCols } };
+    this.fieldA = mk();
+    this.fieldB = mk();
     this.u = {
       uTime: shared.uTime,
-      uLights: { value: this.lights },
-      uLightCol: { value: this.lightCols },
       uFocus: { value: new THREE.Vector2() },
       uReveal: { value: 1 },
+      uFieldA: { value: this.fieldA.texture },
+      uFieldB: { value: this.fieldB.texture },
     };
+    this.fieldMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uLights: this.lightU.uLights,
+        uLightCol: this.lightU.uLightCol,
+        uInvViewProj: { value: this.invViewProj },
+        uPlaneZ: { value: BG_Z },
+        uMode: { value: 0 },
+      },
+      vertexShader: FIELD_VERT,
+      fragmentShader: FIELD_FRAG,
+      defines: { LIGHTS: Math.min(8, lightCount) },
+      blending: THREE.NoBlending,
+      depthTest: false,
+      depthWrite: false,
+    });
+    this.fieldMesh = new THREE.Mesh(shared.quad, this.fieldMat);
+    this.fieldMesh.frustumCulled = false;
+    this.fieldScene.add(this.fieldMesh);
     this.mat = new THREE.ShaderMaterial({
       uniforms: this.u,
       vertexShader: BG_VERT,
@@ -260,9 +306,24 @@ export class Background {
     });
     this.geo = new THREE.PlaneGeometry(260, 260);
     this.mesh = new THREE.Mesh(this.geo, this.mat);
-    this.mesh.position.z = -6.5;
+    this.mesh.position.z = BG_Z;
     this.mesh.frustumCulled = false;
     this.mesh.renderOrder = -10;
+  }
+
+  /** work out the light pools for this frame: two tiny passes, one per output */
+  renderField(renderer: THREE.WebGLRenderer, camera: THREE.PerspectiveCamera) {
+    camera.updateMatrixWorld();
+    this.invViewProj.copy(camera.matrixWorld).multiply(camera.projectionMatrixInverse);
+    const prev = renderer.getRenderTarget();
+    const u = this.fieldMat.uniforms;
+    u.uMode.value = 0;
+    renderer.setRenderTarget(this.fieldA);
+    renderer.render(this.fieldScene, this.fieldCam);
+    u.uMode.value = 1;
+    renderer.setRenderTarget(this.fieldB);
+    renderer.render(this.fieldScene, this.fieldCam);
+    renderer.setRenderTarget(prev);
   }
 
   setLight(i: number, x: number, y: number, radius: number, intensity: number, color?: THREE.Color) {
@@ -274,6 +335,9 @@ export class Background {
   dispose() {
     this.geo.dispose();
     this.mat.dispose();
+    this.fieldA.dispose();
+    this.fieldB.dispose();
+    this.fieldMat.dispose();
   }
 }
 

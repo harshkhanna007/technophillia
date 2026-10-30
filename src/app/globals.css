@@ -1784,7 +1784,7 @@ html.has-cursor * {
 
 
 /* ───────────────────────── lite mode ─────────────────────────
-  The engine sets data-q="lite" on weak devices, or when the frame rate cannot be held. A backdrop blur
+  The engine sets data-q="lite" only when a device cannot hold the frame rate even at reduced resolution. A backdrop blur
   is re-done on the GPU every frame under a live canvas, so on those devices the glass becomes solid dark
   glass (a denser tint, same shape and light), and the entrance blurs become plain fades. */
 :root[data-q='lite'] .reveal__body {
