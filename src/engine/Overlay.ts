@@ -232,16 +232,21 @@ export class Overlay {
       it.split = true;
     }
     const chars = it.title.querySelectorAll('.ch');
-    // weak devices skip the per-letter blur: every blurred letter is its own filtered layer
+    const words = it.title.querySelectorAll('.word');
+    // the letters rise in one by one; the blur resolves once per word, because every blurred element is its own filtered
+    // layer (dozens of them per title when it was per letter) and weak devices skip the blur entirely
     const lite = document.documentElement.dataset.q === 'lite';
     this.tweens.push(
-      gsap.fromTo(
-        chars,
-        lite ? { opacity: 0, y: 16 } : { opacity: 0, y: 16, filter: 'blur(10px)' },
-        lite
-          ? { opacity: 1, y: 0, duration: 0.95 / speed, ease: 'power3.out', stagger: { each: 0.028 / speed, from: 'start' }, overwrite: true }
-          : { opacity: 1, y: 0, filter: 'blur(0px)', duration: 0.95 / speed, ease: 'power3.out', stagger: { each: 0.028 / speed, from: 'start' }, overwrite: true },
-      ),
+      gsap.fromTo(chars, { opacity: 0, y: 16 }, { opacity: 1, y: 0, duration: 0.95 / speed, ease: 'power3.out', stagger: { each: 0.028 / speed, from: 'start' }, overwrite: true }),
+      ...(lite
+        ? []
+        : [
+            gsap.fromTo(
+              words,
+              { filter: 'blur(8px)' },
+              { filter: 'blur(0px)', duration: 1.1 / speed, ease: 'power2.out', stagger: { each: 0.09 / speed, from: 'start' }, overwrite: true, clearProps: 'filter' },
+            ),
+          ]),
       gsap.fromTo(it.title, { letterSpacing: '0.55em' }, { letterSpacing: '0.14em', duration: 1.9 / speed, ease: 'expo.out', overwrite: true }),
       gsap.fromTo(it.desc, { opacity: 0, y: 8 }, { opacity: 1, y: 0, duration: 1.1 / speed, delay: 0.5 / speed, ease: 'power2.out', overwrite: true }),
     );

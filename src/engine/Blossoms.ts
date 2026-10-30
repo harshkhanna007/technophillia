@@ -99,7 +99,7 @@ export class Blossoms {
     this.geo.setAttribute('iState', this.attr);
     this.geo.instanceCount = count;
     this.mat = new THREE.ShaderMaterial({
-      uniforms: { uTime: shared.uTime, uSway: { value: opts.sway ? 1 : 0 } },
+      uniforms: { uTime: shared.uTime, uDpr: shared.uDpr, uSway: { value: opts.sway ? 1 : 0 } },
       vertexShader: BLOSSOM_VERT,
       fragmentShader: BLOSSOM_FRAG,
       ...additive,

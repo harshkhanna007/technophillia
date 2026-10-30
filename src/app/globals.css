@@ -302,7 +302,7 @@ body {
 
 .nd[data-role='active'] .nd__title .ch {
   display: inline-block;
-  will-change: transform, opacity, filter;
+  will-change: transform, opacity;
 }
 
 .nd[data-role='active'] .nd__desc {

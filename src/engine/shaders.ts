@@ -279,6 +279,18 @@ void main(){
 /* Every leaf is one quad. In leaf space u runs base→tip (0..1 leaf lengths) and v runs across; the quad also covers the short
    stalk back to wherever the leaf is anchored. The fragment shader is shared: node sprigs and twig foliage differ only in how
    their vertex shader decides where a leaf stands. */
+/**
+ * Thin glowing lines are never drawn narrower than a pixel. Drawn at a lower resolution a pixel covers more of the
+ * screen, so a line that hit that floor would carry more light than at full resolution. This is the ratio that
+ * keeps its light the same: the width it has at 1x over the width it has now (1 whenever the floor is not reached).
+ */
+const DPR_KEEP = /* glsl */ `
+uniform float uDpr;
+float keep(float nominal, float c, float px){
+  return max(nominal, px * c * min(uDpr, 1.0)) / max(nominal, px * c);
+}
+`;
+
 const LEAF_VARYINGS = /* glsl */ `
 varying vec2 vP;
 varying vec4 vShape; // length (world), half width, curl, stalk (in leaf lengths)
@@ -389,6 +401,7 @@ void main(){
 
 export const LEAF_FRAG = /* glsl */ `
 uniform float uTime;
+${DPR_KEEP}
 ${LEAF_VARYINGS}
 void main(){
   float u = vP.x;
@@ -421,26 +434,26 @@ void main(){
   float hl = max(h * len, 1e-4);
   float across = abs(qy) * len;
 
-  float edge = exp(-pow(dw / max(0.0072, px * 0.75), 2.0));
-  float halo = exp(-pow(dw / max(0.032, px * 2.2), 2.0)) * 0.16;
+  float edge = exp(-pow(dw / max(0.0072, px * 0.75), 2.0)) * keep(0.0072, 0.75, px);
+  float halo = exp(-pow(dw / max(0.032, px * 2.2), 2.0)) * 0.16 * keep(0.032, 2.2, px);
   // a glassy body: lit along the midrib, thinning to the rim and toward the tip
   float depthIn = clamp(-dw / hl, 0.0, 1.0);
   float fill = inside * (0.045 + 0.13 * pow(depthIn, 1.5)) * (1.0 - 0.45 * uc);
-  float rib = exp(-pow(across / max(0.0048, px * 0.7), 2.0)) * inside * smoothstep(0.0, 0.06, uc) * (1.0 - smoothstep(0.55, 0.96, uc)) * smoothstep(7.0, 16.0, sizePx);
-  float stalk = exp(-pow(abs(v) * len / max(0.0052, px * 0.7), 2.0)) * (1.0 - smoothstep(0.0, 0.03, u)) * smoothstep(-stemU, -stemU * 0.55, u);
+  float rib = exp(-pow(across / max(0.0048, px * 0.7), 2.0)) * keep(0.0048, 0.7, px) * inside * smoothstep(0.0, 0.06, uc) * (1.0 - smoothstep(0.55, 0.96, uc)) * smoothstep(7.0, 16.0, sizePx);
+  float stalk = exp(-pow(abs(v) * len / max(0.0052, px * 0.7), 2.0)) * keep(0.0052, 0.7, px) * (1.0 - smoothstep(0.0, 0.03, u)) * smoothstep(-stemU, -stemU * 0.55, u);
 
   // side veins sweep from the rib toward the tip
   float fx = fract((uc - abs(qy) * 1.35) * 5.0);
   float dl = min(fx, 1.0 - fx) / 5.0 * 0.8 * len;
-  float vein = exp(-pow(dl / max(0.0032, px * 0.7), 2.0)) * inside * smoothstep(0.12, 0.3, uc) * (1.0 - smoothstep(0.55, 0.92, uc)) * (1.0 - smoothstep(h * 0.55, h * 0.9, abs(qy))) * smoothstep(34.0, 70.0, sizePx);
+  float vein = exp(-pow(dl / max(0.0032, px * 0.7), 2.0)) * keep(0.0032, 0.7, px) * inside * smoothstep(0.12, 0.3, uc) * (1.0 - smoothstep(0.55, 0.92, uc)) * (1.0 - smoothstep(h * 0.55, h * 0.9, abs(qy))) * smoothstep(34.0, 70.0, sizePx);
 
   // a slow swell of light travels the midrib to the tip, then the tip glints
   float pu = fract(uTime * 0.14 + vSeed) * 1.5 - 0.25;
   float pulse = exp(-pow((uc - pu) / 0.11, 2.0)) * inside * exp(-pow(across / max(hl * 0.9, 1e-3), 2.0)) * smoothstep(8.0, 20.0, sizePx);
   vec2 pt = vec2(u - 1.0, qy) * len;
   float tipD = dot(pt, pt);
-  float spark = exp(-tipD / max(0.00035, px * px * 2.5)) * (0.55 + 0.45 * sin(uTime * 1.9 + vSeed * 40.0));
-  float tipGlow = exp(-tipD / max(0.004, px * px * 14.0)) * 0.35;
+  float spark = exp(-tipD / max(0.00035, px * px * 2.5)) * (max(0.00035, px * px * 2.5 * min(uDpr, 1.0) * min(uDpr, 1.0)) / max(0.00035, px * px * 2.5)) * (0.55 + 0.45 * sin(uTime * 1.9 + vSeed * 40.0));
+  float tipGlow = exp(-tipD / max(0.004, px * px * 14.0)) * 0.35 * (max(0.004, px * px * 14.0 * min(uDpr, 1.0) * min(uDpr, 1.0)) / max(0.004, px * px * 14.0));
 
   vec3 hot = mix(vAccent, vec3(1.0), 0.72);
   vec3 warm = mix(vColA, hot, 0.5);
@@ -847,22 +860,32 @@ void main(){
 `;
 
 /* ───────────────────────── shock ring ───────────────────────── */
+/**
+ * The rings are thin, so they are drawn on a band that only just covers them (a strip around the circle) rather
+ * than on a square that covers the whole screen: position.xy is the direction, position.z picks the inner or outer
+ * edge of the band, and vR carries the exact radius so the fragment shader draws the same rings as before.
+ */
 export const RING_VERT = /* glsl */ `
-varying vec2 vUv;
+varying float vR;
 uniform float uSize;
 uniform vec3 uPos;
+uniform float uAge;
 void main(){
-  vUv = position.xy;
-  gl_Position = projectionMatrix * modelViewMatrix * vec4(uPos + vec3(position.xy * uSize, 0.0), 1.0);
+  float e = 1.0 - pow(1.0 - uAge, 3.0);
+  float w = 0.014 + 0.04 * (1.0 - uAge);
+  float outer = 0.08 + e * 0.9 + 4.5 * w;
+  float inner = max(0.0, 0.06 + e * 0.62 - 2.7 * w);
+  vR = mix(inner, outer, position.z);
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(uPos + vec3(position.xy * vR * uSize, 0.0), 1.0);
 }
 `;
 
 export const RING_FRAG = /* glsl */ `
 uniform float uAge;
 uniform vec3 uColor;
-varying vec2 vUv;
+varying float vR;
 void main(){
-  float r = length(vUv);
+  float r = vR;
   float e = 1.0 - pow(1.0 - uAge, 3.0);
   float R = 0.08 + e * 0.9;
   float w = 0.014 + 0.04 * (1.0 - uAge);
@@ -902,6 +925,7 @@ void main(){
 `;
 
 export const MOMENT_FRAG = /* glsl */ `
+${DPR_KEEP}
 uniform float uAge;
 uniform float uStyle;
 uniform float uSeed;
@@ -1219,6 +1243,7 @@ void main(){
   float t = clamp(uAge, 0.0, 1.0);
   float px = max(fwidth(vP.x), 1e-4);
   float lw = max(0.0042, px * 0.8);
+  float kk = keep(0.0042, 0.8, px);
   vec3 base = uColA;
   vec3 alt = uColB;
   vec3 hot = mix(uAccent, vec3(1.0), 0.7);
@@ -1231,7 +1256,7 @@ void main(){
   else col = quantum(vP, t, lw, base, alt, hot);
   float env = smoothstep(0.0, 0.05, t) * (1.0 - smoothstep(0.84, 1.0, t));
   float rim = 1.0 - smoothstep(0.88, 1.0, max(abs(vP.x), abs(vP.y)));
-  gl_FragColor = vec4(col * env * rim * uPower, 1.0);
+  gl_FragColor = vec4(col * env * rim * uPower * kk, 1.0);
   #include <colorspace_fragment>
 }
 `;
@@ -1269,6 +1294,7 @@ void main(){
 `;
 
 export const BLOSSOM_FRAG = /* glsl */ `
+${DPR_KEEP}
 varying vec2 vP;
 varying vec3 vColA;
 varying vec3 vAccent;
@@ -1310,7 +1336,8 @@ void main(){
   }
   vec3 hot = mix(vAccent, vec3(1.0), 0.65);
   vec3 warm = mix(vColA, hot, 0.55);
-  vec3 col = vColA * (petalsOuter.x + petalsInner.x * 0.85 + halo) + warm * (heart * 1.1 + stamens * 0.5) + hot * (petalsOuter.y + petalsInner.y) * 0.5;
+  float kp = keep(0.035, 0.85, px);
+  vec3 col = vColA * ((petalsOuter.x + petalsInner.x * 0.85) * kp + halo) + warm * (heart * 1.1 + stamens * 0.5) + hot * (petalsOuter.y + petalsInner.y) * 0.5 * kp;
   gl_FragColor = vec4(col * smoothstep(0.0, 0.25, open), 1.0);
   #include <colorspace_fragment>
 }

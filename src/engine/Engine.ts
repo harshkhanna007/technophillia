@@ -178,6 +178,9 @@ export class Engine {
   private cursorLight = 0;
   private lastInput = 0;
   private skipAcc = 0;
+  private lastDrawn = 0;
+  /** drawing every other frame because the device cannot hold 60 (see monitor) */
+  private half = false;
   private skipFlip = false;
   private coarse = false;
   private stemFlare = 0;
@@ -254,7 +257,7 @@ export class Engine {
 
     this.rig = new CameraRig(LOOK.fov, this.w / this.h);
     this.rig.reduced = this.reduced;
-    this.shared = { uTime: { value: 0 }, quad: new THREE.PlaneGeometry(2, 2) };
+    this.shared = { uTime: { value: 0 }, uDpr: { value: this.dpr }, quad: new THREE.PlaneGeometry(2, 2) };
 
     this.buildFx();
     this.world = this.buildWorld(this.layoutKind());
@@ -1199,7 +1202,16 @@ export class Engine {
     );
   }
 
+  /**
+   * How much of each burst of effects to play: 1 on any device that holds full resolution, less as the canvas has had to
+   * drop below it. The burst is what a node opening costs all at once, so a device already short of pixels gets a lighter one.
+   */
+  private fx() {
+    return clamp((this.dpr - LOOK_PROFILE.dprMin) / (1 - LOOK_PROFILE.dprMin), 0.3, 1);
+  }
+
   private burstAt(node: TreeNode, n: number, speed = 3.2) {
+    n = Math.max(8, Math.round(n * this.fx()));
     this.sparks.burst(node.pos.x, node.pos.y, node.pos.z, n, { speed, size: 6, life: 1.3, color: node.palette.a.clone().lerp(node.palette.accent, 0.3), hot: 0.4 });
   }
 
@@ -1384,16 +1396,23 @@ export class Engine {
     this.refreshBuds();
     this.world.overlay.revealTitle(node.id, this.speed() > 1 ? 1.4 : 1);
     this.flareNode(node, 2.6);
+    const fx = this.fx();
     this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.a, 7.2, 2.3);
-    this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.accent, 4.2, 1.5);
-    this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.b, 10.5, 3.0);
+    if (fx > 0.6) {
+      this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.accent, 4.2, 1.5);
+      this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.b, 10.5, 3.0);
+    }
     this.burstAt(node, 240, 6.4);
     this.flash(node.pos.x, node.pos.y, node.palette.a, 1.5, 11, 2.4);
-    this.bloomSurge(1.3);
+    if (fx > 0.5) this.bloomSurge(1.3);
     this.audio.impact();
     this.moments.fire(node, grown ? 1 : 0.6, this.reduced, finishing ? FINALE.scale : 1, finishing ? FINALE.stretch : 1);
-    this.audio.signature(node.style, node.depth, node.index, grown);
-    this.syncHarmony();
+    // the sound's many small voices are set up in a later task, so the frame that shows the node is not held up by them
+    window.setTimeout(() => {
+      if (this.destroyed) return;
+      this.audio.signature(node.style, node.depth, node.index, grown);
+      this.syncHarmony();
+    }, 0);
     if (finishing) this.finaleBranch(node);
     this.haptic([10, 40, 18]);
     if (!this.reduced) {
@@ -1402,6 +1421,29 @@ export class Engine {
     }
     this.rig.followTarget = 0;
     this.emit();
+    this.warmChildren(node);
+  }
+
+  /** build the circuitry of a node's children in idle time: the next click then has nothing heavy left to do */
+  private warmChildren(node: TreeNode) {
+    const world = this.world;
+    const kids = node.children.slice();
+    const next = () => {
+      if (this.destroyed || this.world !== world) return;
+      const kid = kids.shift();
+      if (!kid) return;
+      const rt = world.rts.get(kid.id);
+      if (rt) this.branchFor(rt).ensureDetail(this.profile.detail);
+      this.idle(next);
+    };
+    this.idle(next);
+  }
+
+  /** run something when the browser has a quiet moment (a short timer where there is no idle callback) */
+  private idle(fn: () => void) {
+    const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
+    if (ric) ric(fn, { timeout: 600 });
+    else window.setTimeout(fn, 120);
   }
 
   /** the chord follows the branch you are in and grows with every node left open */
@@ -1891,11 +1933,7 @@ export class Engine {
       }),
       () => this.compileAll(),
     ];
-    const later = (fn: () => void) => {
-      const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number }).requestIdleCallback;
-      if (ric) ric(fn, { timeout: 400 });
-      else window.setTimeout(fn, 80);
-    };
+    const later = (fn: () => void) => this.idle(fn);
     const next = () => {
       // a rebuilt world (the window changed shape) or a click that already built things ends the warm-up
       if (this.destroyed || this.world !== w || this.started) return;
@@ -2149,17 +2187,20 @@ export class Engine {
     const dt = Math.min(0.05, Math.max(0.0005, raw));
     this.lastTime = now;
     this.skipAcc += dt;
-    // battery: on non-flagship devices an idle scene renders every other frame (still 30fps)
-    let idle = false;
-    if (this.introDone && !this.busy && !this.ptr.down && now - this.lastInput > 2500) {
-      idle = true;
+    // an idle scene renders every other frame (still 30fps), and so does a device that cannot hold 60 but can hold a steady
+    // 30: an even 30 looks smoother than a frame rate that keeps slipping between 20 and 50
+    const idle = this.introDone && !this.busy && !this.ptr.down && now - this.lastInput > 2500;
+    if (idle || this.half) {
       this.skipFlip = !this.skipFlip;
       if (this.skipFlip) return;
     }
     const d = Math.min(0.066, this.skipAcc);
     this.skipAcc = 0;
-    // half-rate idle frames say nothing about how the GPU copes, so only real-time frames are measured
-    this.frame(d, idle ? 0 : raw);
+    // idle frames say nothing about how the GPU copes, so only frames that are really being asked for are measured;
+    // what is measured is the gap between drawn frames, so a half-rate device is judged against 30, not 60
+    const gap = (now - this.lastDrawn) / 1000;
+    this.lastDrawn = now;
+    this.frame(d, idle ? 0 : gap);
   };
 
   private frame(dt: number, sample: number) {
@@ -2400,6 +2441,7 @@ glass ${lite ? 'solid' : 'frosted'} · bloom ${this.composer ? 'on' : 'off'}${th
     else this.renderer.setSize(this.w, this.h);
     this.ambient.u.uPx.value = v;
     this.sparks.setPixelRatio(v);
+    this.shared.uDpr.value = v;
     this.drs.settle = SETTLE;
   }
 
@@ -2440,8 +2482,8 @@ glass ${lite ? 'solid' : 'frosted'} · bloom ${this.composer ? 'on' : 'off'}${th
       return;
     }
     // the display's own cadence: what a window that kept up looks like (60Hz unless the frames prove faster)
-    if (avg < 18.3) d.period = clamp(win[count >> 1], 6.9, 17.5);
-    const period = d.period;
+    if (avg < 18.3 && !this.half) d.period = clamp(win[count >> 1], 6.9, 17.5);
+    const period = this.half ? d.period * 2 : d.period;
     const bad = avg > period * 1.25;
     const good = avg < period * 1.12;
     if (d.hold > 0) d.hold--;
@@ -2468,17 +2510,28 @@ glass ${lite ? 'solid' : 'frosted'} · bloom ${this.composer ? 'on' : 'off'}${th
         // already well below full sharpness: the blur under the cards is the next thing to go, before the picture loses more
         this.setLite(true);
         d.settle = SETTLE;
+        d.hold = Math.max(d.hold, 12);
         d.badRun = 0;
       } else if (this.dpr > LOOK_PROFILE.dprMin + 0.01) {
         const k = clamp(Math.sqrt((period * 1.02) / avg), 0.55, 0.92);
         this.setDpr(Math.max(LOOK_PROFILE.dprMin, Math.round(this.dpr * k * 20) / 20));
+        // having stepped down, stay there a while: a canvas that keeps resizing is itself a stutter
+        d.hold = Math.max(d.hold, 12);
         d.badRun = 0;
       } else if (d.badRun >= 2) {
         // the lowest resolution still lags: give up the next cheapest thing
         d.badRun = 0;
-        d.rung++;
-        if (d.rung === 1) this.ambient.points.geometry.setDrawRange(0, this.profile.particles >> 1);
-        else this.dropPost();
+        // slow but steady, and the frames could hold 30: pace them at an even 30. Too slow for that: lighten the scene.
+        if (d.rung === 0 && avg < 36) {
+          d.rung = 1;
+          this.half = true;
+        } else if (d.rung <= 1) {
+          d.rung = 2;
+          this.ambient.points.geometry.setDrawRange(0, this.profile.particles >> 1);
+        } else {
+          d.rung = 3;
+          this.dropPost();
+        }
         d.settle = SETTLE;
       }
       return;

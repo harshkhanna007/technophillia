@@ -32,6 +32,7 @@ export class Moments {
   constructor(shared: Shared, size = 8) {
     for (let i = 0; i < size; i++) {
       const u = {
+        uDpr: shared.uDpr,
         uPos: { value: new THREE.Vector3() },
         uSize: { value: 2.6 },
         uAge: { value: 0 },

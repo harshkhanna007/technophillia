@@ -169,6 +169,7 @@ export class NodeLeaves {
     this.mat = new THREE.ShaderMaterial({
       uniforms: {
         uTime: shared.uTime,
+        uDpr: shared.uDpr,
         uSway: { value: opts.sway ? 1 : 0 },
         uSpecA: { value: LEAF_SPEC_A.map((a) => new THREE.Vector4(...(a as [number, number, number, number]))) },
         uSpecB: { value: LEAF_SPEC_B.map((b) => new THREE.Vector4(b[0], b[1], 0, 0)) },
@@ -509,8 +510,23 @@ export class ShockRings {
   readonly group = new THREE.Group();
   private pool: { mesh: THREE.Mesh; u: Record<string, AnyUniform>; age: number; dur: number; live: boolean }[] = [];
   private mats: THREE.ShaderMaterial[] = [];
+  /** a strip of triangles round a circle: inner edge z = 0, outer edge z = 1 (RING_VERT places them) */
+  private band: THREE.BufferGeometry;
 
   constructor(shared: Shared, size = 10) {
+    void shared;
+    const N = 96;
+    const pos = new Float32Array(N * 2 * 3);
+    const idx: number[] = [];
+    for (let i = 0; i < N; i++) {
+      const a = (i / N) * Math.PI * 2;
+      pos.set([Math.cos(a), Math.sin(a), 0, Math.cos(a), Math.sin(a), 1], i * 6);
+      const j = (i + 1) % N;
+      idx.push(i * 2, i * 2 + 1, j * 2, i * 2 + 1, j * 2 + 1, j * 2);
+    }
+    this.band = new THREE.BufferGeometry();
+    this.band.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    this.band.setIndex(idx);
     for (let i = 0; i < size; i++) {
       const u = {
         uPos: { value: new THREE.Vector3() },
@@ -519,7 +535,7 @@ export class ShockRings {
         uColor: { value: new THREE.Color('#5ae0ff') },
       };
       const mat = new THREE.ShaderMaterial({ uniforms: u, vertexShader: RING_VERT, fragmentShader: RING_FRAG, ...additive });
-      const mesh = new THREE.Mesh(shared.quad, mat);
+      const mesh = new THREE.Mesh(this.band, mat);
       mesh.frustumCulled = false;
       mesh.renderOrder = 8;
       mesh.visible = false;
@@ -552,6 +568,7 @@ export class ShockRings {
   }
 
   dispose() {
+    this.band.dispose();
     for (const m of this.mats) m.dispose();
   }
 }

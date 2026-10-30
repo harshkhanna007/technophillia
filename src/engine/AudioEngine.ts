@@ -92,24 +92,34 @@ export class AudioEngine {
     this.master = master;
     this.dry = ctx.createGain();
     this.dry.connect(master);
-    // generated reverb tail
+    // generated reverb tail. It is built in small pieces over the next few moments rather than in one go: on a slow
+    // device the whole tail takes a third of a second, and this runs on the very click that starts the tree growing
     const conv = ctx.createConvolver();
-    // built on the first tap, so it must be quick: the envelope is stepped every 64 samples (1ms, inaudible),
-    // and weak devices get a slightly shorter tail since convolution runs on the audio thread
-    const len = Math.floor(ctx.sampleRate * (document.documentElement.dataset.q === 'lite' ? 1.7 : 2.4));
-    const ir = ctx.createBuffer(2, len, ctx.sampleRate);
-    for (let c = 0; c < 2; c++) {
-      const d = ir.getChannelData(c);
-      let env = 1;
-      for (let i = 0; i < len; i++) {
-        if ((i & 63) === 0) env = Math.pow(1 - i / len, 2.6);
-        d[i] = (Math.random() * 2 - 1) * env;
-      }
-    }
-    conv.buffer = ir;
     this.wet = ctx.createGain();
     this.wet.gain.value = 0.32;
     this.wet.connect(conv).connect(master);
+    const len = Math.floor(ctx.sampleRate * (document.documentElement.dataset.q === 'lite' ? 1.7 : 2.4));
+    const ir = ctx.createBuffer(2, len, ctx.sampleRate);
+    let ch = 0;
+    let pos = 0;
+    let env = 1;
+    const fill = () => {
+      if (this.ctx !== ctx) return;
+      const d = ir.getChannelData(ch);
+      const end = Math.min(len, pos + 16384);
+      for (let i = pos; i < end; i++) {
+        if ((i & 63) === 0) env = Math.pow(1 - i / len, 2.6);
+        d[i] = (Math.random() * 2 - 1) * env;
+      }
+      pos = end;
+      if (pos >= len) {
+        pos = 0;
+        ch++;
+      }
+      if (ch >= 2) conv.buffer = ir;
+      else window.setTimeout(fill, 4);
+    };
+    window.setTimeout(fill, 30);
     // 1s of white noise reused by every noise voice
     const nb = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
     const nd = nb.getChannelData(0);

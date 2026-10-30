@@ -14,6 +14,8 @@ export type AnyUniform = { value: any };
 
 export interface Shared {
   uTime: Uniform;
+  /** the canvas pixel ratio right now: thin glowing lines use it to keep the same light at lower resolutions */
+  uDpr: Uniform;
   quad: THREE.PlaneGeometry; // ±1 quad
 }
 
