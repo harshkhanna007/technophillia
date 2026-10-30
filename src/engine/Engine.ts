@@ -1380,6 +1380,16 @@ export class Engine {
     );
   }
 
+  /** run something n frames from now: the work of a node opening is spread over a few frames, never done in one */
+  private afterFrames(n: number, fn: () => void) {
+    const step = (left: number) => {
+      if (this.destroyed) return;
+      if (left <= 0) fn();
+      else requestAnimationFrame(() => step(left - 1));
+    };
+    step(n);
+  }
+
   private arrive(node: TreeNode, grown: boolean) {
     const rt = this.world.rts.get(node.id)!;
     rt.pending = false;
@@ -1387,36 +1397,40 @@ export class Engine {
     rt.hovT = this.hoverId === node.id ? 1 : 0;
     this.path = ancestry(node);
     const finishing = this.visit(node);
-    this.setReveal(node, grown, finishing);
-    this.refreshBuds();
-    this.world.overlay.revealTitle(node.id, this.speed() > 1 ? 1.4 : 1);
-    this.flareNode(node, 2.6);
     const fx = this.fx();
+
+    // frame 0: only what the eye needs first (the node lights, a ring, a flash, the camera kick)
+    this.refreshBuds();
+    this.flareNode(node, 2.6);
     this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.a, 7.2, 2.3);
-    if (fx > 2) {
-      this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.accent, 4.2, 1.5);
-      this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.b, 10.5, 3.0);
-    }
-    this.burstAt(node, 110, 6.4);
     this.flash(node.pos.x, node.pos.y, node.palette.a, 1.5, 11, 2.4);
-    if (fx > 2) this.bloomSurge(1.3);
-    this.audio.impact();
-    // the moment's shader is the costliest thing a click plays: a weak device gets it smaller (a third of the pixels)
-    this.moments.fire(node, grown ? 1 : 0.6, this.reduced, this.momentScale(node, (finishing ? FINALE.scale : 1) * (this.weak ? 0.65 : 1)), finishing ? FINALE.stretch : 1);
-    // the sound's many small voices are set up in a later task, so the frame that shows the node is not held up by them
-    window.setTimeout(() => {
-      if (this.destroyed) return;
-      this.audio.signature(node.style, node.depth, node.index, grown);
-      this.syncHarmony();
-    }, 0);
-    if (finishing) this.finaleBranch(node);
-    this.haptic([10, 40, 18]);
     if (!this.reduced) {
       this.rig.impulse(-13 * this.weight);
       this.rig.shake((node.index % 2 ? 1 : -1) * 0.035 * this.weight);
     }
     this.rig.followTarget = 0;
-    this.emit();
+
+    // frame 1: the signature moment and the sparks
+    this.afterFrames(1, () => {
+      // the moment's shader is the costliest thing a click plays: a weak device gets it smaller, and none covers more than the screen allows
+      this.moments.fire(node, grown ? 1 : 0.6, this.reduced, this.momentScale(node, (finishing ? FINALE.scale : 1) * (this.weak ? 0.65 : 1)), finishing ? FINALE.stretch : 1);
+      this.burstAt(node, 110, 6.4);
+      if (fx > 2) this.bloomSurge(1.3);
+    });
+    // frame 2: the title and the card (the page's own work: text, layout, the React state)
+    this.afterFrames(2, () => {
+      this.setReveal(node, grown, finishing);
+      this.world.overlay.revealTitle(node.id, this.speed() > 1 ? 1.4 : 1);
+      this.emit();
+    });
+    // frame 3: sound, haptics and the finale
+    this.afterFrames(3, () => {
+      this.audio.impact();
+      this.haptic([10, 40, 18]);
+      this.audio.signature(node.style, node.depth, node.index, grown);
+      this.syncHarmony();
+      if (finishing) this.finaleBranch(node);
+    });
     this.warmChildren(node);
   }
 
