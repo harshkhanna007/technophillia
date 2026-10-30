@@ -175,6 +175,8 @@ export class Engine {
   private cursorLight = 0;
   private lastInput = 0;
   private skipAcc = 0;
+  /** a device with few cores or little memory: its click effects start light instead of waiting to be measured */
+  private weak = (navigator.hardwareConcurrency || 4) <= 4 || ((navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8) <= 4;
   private lastDrawn = 0;
   /** drawing every other frame because the device cannot hold 60 (see monitor) */
   private half = false;
@@ -1199,6 +1201,7 @@ export class Engine {
    * drop below it. The burst is what a node opening costs all at once, so a device already short of pixels gets a lighter one.
    */
   private fx() {
+    if (this.weak) return Math.min(0.4, clamp((this.dpr - LOOK_PROFILE.dprMin) / (1 - LOOK_PROFILE.dprMin), 0.3, 1));
     return clamp((this.dpr - LOOK_PROFILE.dprMin) / (1 - LOOK_PROFILE.dprMin), 0.3, 1);
   }
 
@@ -1398,7 +1401,8 @@ export class Engine {
     this.flash(node.pos.x, node.pos.y, node.palette.a, 1.5, 11, 2.4);
     if (fx > 2) this.bloomSurge(1.3);
     this.audio.impact();
-    this.moments.fire(node, grown ? 1 : 0.6, this.reduced, finishing ? FINALE.scale : 1, finishing ? FINALE.stretch : 1);
+    // the moment's shader is the costliest thing a click plays: a weak device gets it smaller (a third of the pixels)
+    this.moments.fire(node, grown ? 1 : 0.6, this.reduced, (finishing ? FINALE.scale : 1) * (this.weak ? 0.65 : 1), finishing ? FINALE.stretch : 1);
     // the sound's many small voices are set up in a later task, so the frame that shows the node is not held up by them
     window.setTimeout(() => {
       if (this.destroyed) return;
