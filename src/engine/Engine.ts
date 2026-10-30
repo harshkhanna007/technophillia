@@ -238,7 +238,8 @@ export class Engine {
     this.h = Math.max(1, host.clientHeight);
     // every device gets the same picture; only its sharpness is negotiated. Start modest and sharpen while the frame rate holds.
     this.dprMax = maxDpr(this.w, this.h);
-    this.dpr = Math.min(this.dprMax, 1);
+    // phones are small but dense: they get the sharp ratio their pixel budget allows; the monitor steps down if they cannot hold it
+    this.dpr = this.dprMax;
     this.setLite(true);
     const qs = new URLSearchParams(window.location.search);
     const pin = Number(qs.get('dpr'));

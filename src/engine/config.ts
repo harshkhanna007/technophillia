@@ -5,7 +5,7 @@
  */
 export const LOOK_PROFILE = {
   /** sharpest pixel ratio the canvas may reach, and the most pixels it may render at that ratio */
-  dprMax: 1,
+  dprMax: 2,
   budget: 1.4e6,
   /** the canvas never drops below this ratio, however slow the device */
   dprMin: 0.5,
