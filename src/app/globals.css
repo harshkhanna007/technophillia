@@ -95,10 +95,13 @@ body {
   width: 0;
   height: 0;
   visibility: hidden;
-  will-change: transform, opacity;
   --c: #37d8ff;
   --c2: #ffffff;
   --c3: #7b5cff;
+}
+
+.nd:not([data-role='hidden']) {
+  will-change: transform, opacity;
 }
 
 .nd__btn {

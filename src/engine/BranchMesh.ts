@@ -199,6 +199,8 @@ export class BranchMesh {
     const gm = new THREE.ShaderMaterial({ uniforms: this.ghostU, vertexShader: TRACE_VERT, fragmentShader: TRACE_FRAG, ...additive });
     this.ghostMesh = new THREE.Mesh(gg, gm);
     this.ghostMesh.frustumCulled = false;
+    this.ghostMesh.matrixAutoUpdate = false;
+    this.group.matrixAutoUpdate = false;
     this.ghostMesh.renderOrder = 1;
     this.ghostMesh.visible = false;
     this.group.add(this.ghostMesh);
@@ -264,6 +266,7 @@ export class BranchMesh {
     const mat = new THREE.ShaderMaterial({ uniforms: this.u, vertexShader: TRACE_VERT, fragmentShader: TRACE_FRAG, ...additive });
     this.traceMesh = new THREE.Mesh(geo, mat);
     this.traceMesh.frustumCulled = false;
+    this.traceMesh.matrixAutoUpdate = false;
     this.traceMesh.renderOrder = 2;
     this.group.add(this.traceMesh);
     this.disposables.push(geo, mat);
@@ -273,6 +276,7 @@ export class BranchMesh {
       const pm = new THREE.ShaderMaterial({ uniforms: this.u, vertexShader: PART_VERT, fragmentShader: PART_FRAG, ...additive });
       this.partMesh = new THREE.Mesh(pg, pm);
       this.partMesh.frustumCulled = false;
+      this.partMesh.matrixAutoUpdate = false;
       this.partMesh.renderOrder = 3;
       this.group.add(this.partMesh);
       // position/index attributes belong to the shared quad – only dispose instance data

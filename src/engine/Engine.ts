@@ -1402,7 +1402,7 @@ export class Engine {
     if (fx > 2) this.bloomSurge(1.3);
     this.audio.impact();
     // the moment's shader is the costliest thing a click plays: a weak device gets it smaller (a third of the pixels)
-    this.moments.fire(node, grown ? 1 : 0.6, this.reduced, (finishing ? FINALE.scale : 1) * (this.weak ? 0.65 : 1), finishing ? FINALE.stretch : 1);
+    this.moments.fire(node, grown ? 1 : 0.6, this.reduced, this.momentScale(node, (finishing ? FINALE.scale : 1) * (this.weak ? 0.65 : 1)), finishing ? FINALE.stretch : 1);
     // the sound's many small voices are set up in a later task, so the frame that shows the node is not held up by them
     window.setTimeout(() => {
       if (this.destroyed) return;
@@ -1418,6 +1418,16 @@ export class Engine {
     this.rig.followTarget = 0;
     this.emit();
     this.warmChildren(node);
+  }
+
+  /** shrink a moment so its square covers at most ~0.7 of the screen height: its shader cost grows with that area */
+  private momentScale(node: TreeNode, scale: number) {
+    const cam = this.rig.camera;
+    const base = node.depth <= 1 ? 2.9 : node.depth === 2 ? 2.6 : 2.3;
+    const dist = Math.max(1, cam.position.z - node.pos.z);
+    const worldH = 2 * dist * Math.tan(THREE.MathUtils.degToRad(cam.fov / 2));
+    const maxSize = (0.7 * worldH) / 2;
+    return Math.min(scale, maxSize / base);
   }
 
   /** build the circuitry of a node's children in idle time: the next click then has nothing heavy left to do */
