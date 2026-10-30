@@ -239,6 +239,7 @@ export class Engine {
     // every device gets the same picture; only its sharpness is negotiated. Start modest and sharpen while the frame rate holds.
     this.dprMax = maxDpr(this.w, this.h);
     this.dpr = Math.min(this.dprMax, 1);
+    this.setLite(true);
     const qs = new URLSearchParams(window.location.search);
     const pin = Number(qs.get('dpr'));
     if (pin > 0) {
@@ -1397,7 +1398,7 @@ export class Engine {
       this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.accent, 4.2, 1.5);
       this.rings.fire(node.pos.x, node.pos.y, node.pos.z, node.palette.b, 10.5, 3.0);
     }
-    this.burstAt(node, 240, 6.4);
+    this.burstAt(node, 110, 6.4);
     this.flash(node.pos.x, node.pos.y, node.palette.a, 1.5, 11, 2.4);
     if (fx > 0.5) this.bloomSurge(1.3);
     this.audio.impact();
@@ -2508,7 +2509,7 @@ export class Engine {
     }
     d.badRun = 0;
     d.probe = 0;
-    if (good && d.rung === 0 && d.hold === 0 && this.dpr < this.dprMax - 0.01) {
+    if (false && good && d.rung === 0 && d.hold === 0 && this.dpr < this.dprMax - 0.01) {
       d.probe = this.dpr;
       this.setDpr(Math.min(this.dprMax, Math.round((this.dpr + 0.25) * 20) / 20));
     }
