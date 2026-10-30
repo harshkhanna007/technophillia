@@ -287,7 +287,8 @@ void main(){
 const DPR_KEEP = /* glsl */ `
 uniform float uDpr;
 float keep(float nominal, float c, float px){
-  return max(nominal, px * c * min(uDpr, 1.0)) / max(nominal, px * c);
+  // measured against the 1x picture: the full ratio over-corrects (the bloom already spreads the extra light), 0.76 of it matches
+  return pow(max(nominal, px * c * min(uDpr, 1.0)) / max(nominal, px * c), 0.76);
 }
 `;
 
@@ -452,8 +453,8 @@ void main(){
   float pulse = exp(-pow((uc - pu) / 0.11, 2.0)) * inside * exp(-pow(across / max(hl * 0.9, 1e-3), 2.0)) * smoothstep(8.0, 20.0, sizePx);
   vec2 pt = vec2(u - 1.0, qy) * len;
   float tipD = dot(pt, pt);
-  float spark = exp(-tipD / max(0.00035, px * px * 2.5)) * (max(0.00035, px * px * 2.5 * min(uDpr, 1.0) * min(uDpr, 1.0)) / max(0.00035, px * px * 2.5)) * (0.55 + 0.45 * sin(uTime * 1.9 + vSeed * 40.0));
-  float tipGlow = exp(-tipD / max(0.004, px * px * 14.0)) * 0.35 * (max(0.004, px * px * 14.0 * min(uDpr, 1.0) * min(uDpr, 1.0)) / max(0.004, px * px * 14.0));
+  float spark = exp(-tipD / max(0.00035, px * px * 2.5)) * pow(max(0.00035, px * px * 2.5 * min(uDpr, 1.0) * min(uDpr, 1.0)) / max(0.00035, px * px * 2.5), 0.76) * (0.55 + 0.45 * sin(uTime * 1.9 + vSeed * 40.0));
+  float tipGlow = exp(-tipD / max(0.004, px * px * 14.0)) * 0.35 * pow(max(0.004, px * px * 14.0 * min(uDpr, 1.0) * min(uDpr, 1.0)) / max(0.004, px * px * 14.0), 0.76);
 
   vec3 hot = mix(vAccent, vec3(1.0), 0.72);
   vec3 warm = mix(vColA, hot, 0.5);
