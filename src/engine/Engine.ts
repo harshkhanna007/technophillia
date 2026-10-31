@@ -175,6 +175,7 @@ export class Engine {
   private cursorLight = 0;
   private lastInput = 0;
   private skipAcc = 0;
+  private warming = false;
   /** a device with few cores or little memory: its click effects start light instead of waiting to be measured */
   private weak = (navigator.hardwareConcurrency || 4) <= 4 || ((navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8) <= 4;
   private lastDrawn = 0;
@@ -1943,6 +1944,8 @@ export class Engine {
    * is compiled. Otherwise each of those lands as a stutter right when the tree starts to move.
    */
   private warmUp() {
+    if (this.warming) return;
+    this.warming = true;
     const w = this.world;
     const steps: (() => void)[] = [
       () => w.stem.ensureDetail(this.profile.detail),
@@ -1955,8 +1958,9 @@ export class Engine {
     ];
     const later = (fn: () => void) => this.idle(fn);
     const next = () => {
-      // a rebuilt world (the window changed shape) or a click that already built things ends the warm-up
-      if (this.destroyed || this.world !== w || this.started) return;
+      // a rebuilt world (the window changed shape) ends the warm-up; the click on the seed does not, so the work
+      // still left runs while the stem grows and the visitor looks, not on their first node click
+      if (this.destroyed || this.world !== w) return;
       const step = steps.shift();
       if (!step) return;
       step();
@@ -1970,6 +1974,7 @@ export class Engine {
     if (this.started || this.destroyed) return;
     this.started = true;
     this.ready = true;
+    this.warmUp();
     const sp = this.speed();
     const stem = this.world.stem;
     stem.ensureDetail(this.profile.detail);
